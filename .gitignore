@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+dist_*/
+*.spec.bak
+config.json
+history/
+logs/
+work/
+HANDOVER.md
