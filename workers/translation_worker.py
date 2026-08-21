@@ -26,7 +26,6 @@ class PipelineTask(QThread):
     status = Signal(str)
     error = Signal(str)
     result = Signal(object)
-    finished = Signal()
 
     def __init__(
         self,
@@ -139,8 +138,5 @@ class PipelineTask(QThread):
         except Exception as exc:
             log.exception("管线处理失败")
             self.error.emit(f"处理失败：{exc}")
-        finally:
-            self.finished.emit()
-
     def _emit_status(self, text: str) -> None:
         self.status.emit(text)

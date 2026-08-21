@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ctypes
+import itertools
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -22,7 +23,8 @@ class _RECT(ctypes.Structure):
     ]
 
 
-_MONITOR_ENUM_PROC = ctypes.WINFUNCTYPE(
+_CALLBACK_FACTORY = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+_MONITOR_ENUM_PROC = _CALLBACK_FACTORY(
     ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(_RECT), ctypes.c_void_p
 )
 
@@ -92,30 +94,109 @@ def build_monitor_map(screens, physical_monitors: list[tuple[int, int, int, int]
 
     screens 元素需有 geometry() 和 devicePixelRatio()。
     """
-    result: list[MonitorInfo] = []
-    for idx, screen in enumerate(screens):
+    screens = list(screens)
+    if not screens:
+        return []
+    physical_monitors = list(physical_monitors)
+    if len(physical_monitors) < len(screens):
+        # A hot-plug race or a non-Windows backend can expose fewer native
+        # rectangles than Qt screens. Add per-screen inferred candidates so the
+        # assignment can remain one-to-one instead of silently reusing a monitor.
+        for screen in screens:
+            geo = screen.geometry()
+            dpr = float(screen.devicePixelRatio())
+            inferred = (
+                round(geo.x() * dpr),
+                round(geo.y() * dpr),
+                round((geo.x() + geo.width()) * dpr),
+                round((geo.y() + geo.height()) * dpr),
+            )
+            if inferred not in physical_monitors:
+                physical_monitors.append(inferred)
+
+    logical_centers = [
+        (screen.geometry().center().x(), screen.geometry().center().y()) for screen in screens
+    ]
+    physical_centers = [
+        ((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
+        for rect in physical_monitors
+    ]
+
+    def _ranks(values: list[float]) -> list[int]:
+        order = sorted(range(len(values)), key=lambda index: (values[index], index))
+        ranks = [0] * len(values)
+        for rank, index in enumerate(order):
+            ranks[index] = rank
+        return ranks
+
+    logical_x_rank = _ranks([center[0] for center in logical_centers])
+    logical_y_rank = _ranks([center[1] for center in logical_centers])
+    physical_x_rank = _ranks([center[0] for center in physical_centers])
+    physical_y_rank = _ranks([center[1] for center in physical_centers])
+
+    def _pair_cost(screen_index: int, physical_index: int) -> float:
+        screen = screens[screen_index]
         geo = screen.geometry()
         dpr = float(screen.devicePixelRatio())
-        logical_origin = (geo.x(), geo.y())
+        expected_width = max(1.0, geo.width() * dpr)
+        expected_height = max(1.0, geo.height() * dpr)
+        rect = physical_monitors[physical_index]
+        width = max(1.0, rect[2] - rect[0])
+        height = max(1.0, rect[3] - rect[1])
+        size_cost = abs(width - expected_width) / expected_width + abs(
+            height - expected_height
+        ) / expected_height
+        rank_cost = abs(logical_x_rank[screen_index] - physical_x_rank[physical_index])
+        rank_cost += 0.35 * abs(
+            logical_y_rank[screen_index] - physical_y_rank[physical_index]
+        )
         expected = (
             round(geo.x() * dpr),
             round(geo.y() * dpr),
             round((geo.x() + geo.width()) * dpr),
             round((geo.y() + geo.height()) * dpr),
         )
-        best_idx, best_iou = 0, -1.0
-        for mi, rect in enumerate(physical_monitors):
-            score = _iou(expected, rect)
-            if score > best_iou:
-                best_iou, best_idx = score, mi
-        if best_iou <= 0:
-            best_idx = min(idx, max(0, len(physical_monitors) - 1))
+        iou_bonus = _iou(expected, rect)
+        origin_bonus = 0.0
+        if geo.contains(0, 0) == (
+            rect[0] <= 0 < rect[2] and rect[1] <= 0 < rect[3]
+        ):
+            origin_bonus = 0.5
+        return size_cost * 8.0 + rank_cost * 1.5 - iou_bonus * 3.0 - origin_bonus
+
+    # A physical monitor may back exactly one QScreen. Exhaustive assignment is
+    # tiny in practice (usually 1–4 screens) and avoids duplicate mapping when
+    # Win32 enumeration order differs from Qt, especially with mixed DPI.
+    if len(physical_monitors) >= len(screens) and len(screens) <= 8:
+        assignments = itertools.permutations(range(len(physical_monitors)), len(screens))
+        best_assignment = min(
+            assignments,
+            key=lambda values: sum(
+                _pair_cost(screen_index, physical_index)
+                for screen_index, physical_index in enumerate(values)
+            ),
+        )
+    else:
+        best_assignment = tuple(
+            min(
+                range(len(physical_monitors)),
+                key=lambda physical_index: _pair_cost(screen_index, physical_index),
+            )
+            for screen_index in range(len(screens))
+        )
+
+    result: list[MonitorInfo] = []
+    for idx, screen in enumerate(screens):
+        geo = screen.geometry()
+        best_idx = best_assignment[idx]
         result.append(
             MonitorInfo(
-                index=best_idx,
+                # OverlayManager groups by this key; it must remain unique even
+                # if an operating-system monitor mapping is imperfect.
+                index=idx,
                 physical=physical_monitors[best_idx],
-                logical_origin=logical_origin,
-                dpr=dpr,
+                logical_origin=(geo.x(), geo.y()),
+                dpr=float(screen.devicePixelRatio()),
             )
         )
     return result
@@ -156,6 +237,16 @@ def logical_rect_to_physical_union(
     rect: tuple[int, int, int, int], monitors: list[MonitorInfo]
 ) -> tuple | None:
     """Qt 全局逻辑矩形 -> 物理矩形并集（跨显示器时逐屏换算）。"""
+    parts = logical_rect_to_physical_parts(rect, monitors)
+    if not parts:
+        return None
+    return union_rects(parts)
+
+
+def logical_rect_to_physical_parts(
+    rect: tuple[int, int, int, int], monitors: list[MonitorInfo]
+) -> list[tuple[int, int, int, int]]:
+    """Map a global logical selection into independent per-monitor physical parts."""
     parts: list[tuple[int, int, int, int]] = []
     for monitor in monitors:
         ox, oy = monitor.logical_origin
@@ -169,9 +260,18 @@ def logical_rect_to_physical_union(
         if inter is None:
             continue
         parts.append(logical_rect_to_physical_rect(inter, monitor))
+    return parts
+
+
+def parts_form_rectangle(parts: Sequence[tuple[int, int, int, int]]) -> bool:
+    """Whether physical parts exactly tile their bounding rectangle without gaps."""
     if not parts:
-        return None
-    return union_rects(parts)
+        return False
+    union = union_rects(parts)
+    union_area = _area(union)
+    # Monitor rectangles do not overlap in the supported desktop layout; equality
+    # catches mixed-DPI/gapped selections that a single mss bbox cannot represent.
+    return sum(_area(part) for part in parts) == union_area
 
 
 def physical_rect_to_overlay_geometry(

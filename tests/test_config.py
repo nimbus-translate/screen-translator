@@ -8,6 +8,9 @@ def test_defaults_loaded(tmp_path):
     assert config.get("ocr.min_confidence") == 0.6
     assert config.get("translation.service") == "google_free"
     assert config.hotkeys()["capture_region"] == "ctrl+shift+a"
+    assert config.get("appearance.palette") == "warm_paper"
+    assert config.get("appearance.accent") == "#2878E8"
+    assert config.get("appearance.motion_profile") == "flow"
 
 
 def test_merge_partial(tmp_path):
@@ -16,6 +19,7 @@ def test_merge_partial(tmp_path):
     config = AppConfig(path)
     assert config.get("ocr.min_confidence") == 0.8
     assert config.get("ocr.engine") == "paddle"
+    assert config.get("appearance.density") == "balanced"
 
 
 def test_save_load_roundtrip(tmp_path):
@@ -23,10 +27,34 @@ def test_save_load_roundtrip(tmp_path):
     config = AppConfig(path)
     config.set("overlay.font_size", 24)
     config.set("hotkeys.capture_region", "ctrl+alt+x")
+    config.set("appearance.palette", "midnight")
+    config.set("appearance.accent", "#7258D6")
     config.save()
     config2 = AppConfig(path)
     assert config2.get("overlay.font_size") == 24
     assert config2.hotkeys()["capture_region"] == "ctrl+alt+x"
+    assert config2.get("appearance.palette") == "midnight"
+    assert config2.get("appearance.accent") == "#7258D6"
+
+
+def test_invalid_appearance_values_fall_back_without_touching_other_sections(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"appearance":{"palette":"laser","accent":"red/blue",'
+        '"motion_profile":"warp","density":"tiny","surface":"glass",'
+        '"reduce_motion":"no"},"ocr":{"min_confidence":0.77}}',
+        encoding="utf-8",
+    )
+
+    config = AppConfig(path)
+
+    assert config.get("appearance.palette") == "warm_paper"
+    assert config.get("appearance.accent") == "#2878E8"
+    assert config.get("appearance.motion_profile") == "flow"
+    assert config.get("appearance.density") == "balanced"
+    assert config.get("appearance.surface") == "layered"
+    assert config.get("appearance.reduce_motion") is False
+    assert config.get("ocr.min_confidence") == 0.77
 
 
 def test_masked_snapshot_hides_keys(tmp_path):
