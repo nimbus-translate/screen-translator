@@ -1,22 +1,59 @@
-# 屏幕截图翻译覆盖工具（ScreenTranslator）
+<div align="center">
+  <img src="assets/app_launch_v4.png" width="150" alt="ScreenTranslator logo">
+  <h1>ScreenTranslator · 屏幕翻译器</h1>
+  <p><strong>框选屏幕上的文字，自动识别、翻译，再把译文覆盖回原位置。</strong></p>
+  <p>Windows 10/11 · 开源免费 · 默认无需 API Key</p>
+  <p>
+    <a href="https://github.com/nimbus-translate/screen-translator/releases/latest"><strong>⬇️ 下载 Windows 版</strong></a>
+    ·
+    <a href="#30-秒开始">快速开始</a>
+    ·
+    <a href="https://github.com/nimbus-translate/screen-translator/issues">反馈问题</a>
+  </p>
+  <p>
+    <img alt="GitHub release" src="https://img.shields.io/github/v/release/nimbus-translate/screen-translator?style=flat-square">
+    <img alt="License" src="https://img.shields.io/github/license/nimbus-translate/screen-translator?style=flat-square">
+    <img alt="Windows" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?style=flat-square&logo=windows">
+    <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white">
+  </p>
+</div>
 
-> A Windows desktop screen translator: capture any region, run OCR, translate it, and place the result back over the original content.
+---
 
-## Why ScreenTranslator
+ScreenTranslator 专门处理**无法复制的文字**：游戏、漫画、视频字幕、图片、网页和老旧软件。工作流只有四步：**截图 → OCR → 翻译 → 原位覆盖**。
 
-ScreenTranslator is built for text that cannot be copied: games, comics, videos, images, legacy software, and web content. It keeps the workflow short: **capture → recognize → translate → overlay**.
+> ScreenTranslator is an open-source Windows screen translator for games, comics, videos, images, legacy software, and other text you cannot copy. Capture any region, run OCR, translate it, and place the result back over the original content.
 
-### Share this project
+## 适合这些场景
 
-> ScreenTranslator is an open-source Windows screen translation tool with region, full-screen and active-window capture; PaddleOCR; multiple translation providers; editable overlay results; global hotkeys; and DPI-aware multi-monitor support. Contributions and real-world feedback are welcome.
+| 场景 | 你得到什么 |
+| --- | --- |
+| 外语游戏 / 漫画 | 框选文字后直接在原位置查看译文 |
+| 视频字幕 / 图片 | 不复制、不切窗口，快捷键完成识别翻译 |
+| 老软件 / 远程桌面 | 对无法选中的界面文字进行 OCR 翻译 |
+| 多显示器办公 | 支持 DPI 缩放与负坐标显示器 |
 
-## Open-source
+## 界面预览
 
-- License: [MIT](LICENSE)
-- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Please never commit API keys, local configuration files, screenshots, or model caches.
+| 主界面 | 设置中心 |
+| --- | --- |
+| ![ScreenTranslator 主界面](assets/screenshots/home.png) | ![ScreenTranslator 设置中心](assets/screenshots/settings.png) |
 
-Windows 10/11 桌面工具：按快捷键截图（全屏 / 当前窗口 / 框选）→ PaddleOCR 识别 → 自动翻译 → 用透明置顶覆盖层把译文盖在原文位置。适用于游戏、漫画、网页、图片、视频字幕等无法直接复制文字的场景。
+## 30 秒开始
+
+1. 前往 [Releases](https://github.com/nimbus-translate/screen-translator/releases/latest) 下载最新 Windows 版本。
+2. 启动 ScreenTranslator；首次 OCR 会自动下载轻量模型。
+3. 按 `Ctrl+Shift+A` 框选区域，等待译文覆盖到原文字位置。
+4. 遇到问题请提交 [Issue](https://github.com/nimbus-translate/screen-translator/issues/new)。
+
+默认使用免 Key 的 Google 翻译，也支持 OpenAI、DeepL、Google Cloud Translation 和 MyMemory。默认不保存截图与识别历史。
+
+## 开源与参与
+
+- [MIT License](LICENSE)
+- [贡献指南](CONTRIBUTING.md)
+- 欢迎提交真实场景反馈，尤其是 OCR 准确率、多显示器 DPI 和覆盖层可读性问题
+- 请勿提交 API Key、本地配置、私人截图或模型缓存
 
 ## 功能
 
