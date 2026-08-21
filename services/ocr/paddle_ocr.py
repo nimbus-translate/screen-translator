@@ -85,6 +85,7 @@ class PaddleOCREngine(OCREngine):
 
             return True
         except Exception:
+            log.exception("PaddleOCR 依赖检查失败")
             return False
 
     def _build_engine(self, lang: str) -> None:

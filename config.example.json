@@ -5,9 +5,17 @@
     "save_history": false,
     "history_dir": ""
   },
+  "appearance": {
+    "schema_version": 1,
+    "palette": "warm_paper",
+    "accent": "#2878E8",
+    "motion_profile": "flow",
+    "density": "balanced",
+    "surface": "layered",
+    "reduce_motion": false
+  },
   "capture": {
-    "select_mask_opacity": 100,
-    "select_border_color": "#2878E8"
+    "select_mask_opacity": 84
   },
   "ocr": {
     "engine": "paddle",

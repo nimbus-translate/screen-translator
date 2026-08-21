@@ -38,7 +38,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=["paddle_runtime_hook.py"],
-    excludes=["tkinter", "matplotlib", "scipy"],
+    # PaddleX imports sklearn at module load; sklearn requires scipy even for
+    # the OCR-only pipeline. Excluding scipy makes the frozen OCR registry fail.
+    excludes=["tkinter", "matplotlib"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
@@ -56,5 +58,5 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon="assets/app_launch_v3.ico",
+    icon="assets/app_launch_v4.ico",
 )

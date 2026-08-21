@@ -11,14 +11,25 @@ def _setup_runtime() -> None:
     try:
         import ctypes
 
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4. The older
+        # SetProcessDpiAwareness(2) API enables V1 only.
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
     except Exception:
-        try:
-            import ctypes
+        pass
+    try:
+        import ctypes
 
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
 def main() -> int:

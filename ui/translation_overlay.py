@@ -4,11 +4,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, Qt, Signal
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    Signal,
+    QVariantAnimation,
+)
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import QWidget
 
 from app.logger import get_logger
+from ui.motion import (
+    BASE,
+    FAST,
+    MICRO,
+    SLOW,
+    ENTER_EASING,
+    EXIT_EASING,
+    MOVE_EASING,
+    motion_duration,
+)
 
 log = get_logger("overlay")
 
@@ -36,11 +55,24 @@ class TranslationOverlayWindow(QWidget):
         self._config = config
         self._blocks: list[Block] = []
         self._size_groups: dict[int, float] = {}
+        self._font_cache: dict[int, QFont] = {}
+        self._reveal_ranks: dict[int, int] = {}
+        self._reveal_progress = 1.0
         self._edit_mode = False
         self._drag_index: int | None = None
         self._drag_offset = QPoint(0, 0)
-        self._fade_animation: QPropertyAnimation | None = None
-        self._hide_animation: QPropertyAnimation | None = None
+
+        self._fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_animation.setEndValue(1.0)
+        self._fade_animation.setEasingCurve(ENTER_EASING)
+        self._hide_animation = QPropertyAnimation(self, b"windowOpacity", self)
+        self._hide_animation.setEndValue(0.0)
+        self._hide_animation.setEasingCurve(EXIT_EASING)
+        self._hide_animation.finished.connect(self.hide)
+        self._reveal_animation = QVariantAnimation(self)
+        self._reveal_animation.setEasingCurve(MOVE_EASING)
+        self._reveal_animation.valueChanged.connect(self._set_reveal_progress)
+        self._reveal_animation.finished.connect(self._finish_reveal)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -51,13 +83,23 @@ class TranslationOverlayWindow(QWidget):
 
     # ------------------------------------------------------------- public
     def set_blocks(self, blocks: list[Block]) -> None:
+        self._reveal_animation.stop()
         self._blocks = blocks
+        self._font_cache = {}
         self._compute_size_groups()
+        self._compute_reveal_order()
+        self._reveal_progress = 0.0 if blocks and not self._edit_mode else 1.0
+        if self.isVisible() and self._reveal_progress < 1.0:
+            self._start_reveal()
         self.update()
 
     def clear(self) -> None:
+        self._reveal_animation.stop()
         self._blocks = []
         self._size_groups = {}
+        self._font_cache = {}
+        self._reveal_ranks = {}
+        self._reveal_progress = 1.0
         self.update()
 
     def _compute_size_groups(self) -> None:
@@ -84,31 +126,123 @@ class TranslationOverlayWindow(QWidget):
             for idx in group:
                 self._size_groups[idx] = median_height
 
+    def _compute_reveal_order(self) -> None:
+        """Reveal in visual reading order without changing the block list."""
+        ordered = sorted(
+            range(len(self._blocks)),
+            key=lambda index: (
+                self._blocks[index].rect.top(),
+                self._blocks[index].rect.left(),
+            ),
+        )
+        self._reveal_ranks = {index: rank for rank, index in enumerate(ordered)}
+
+    def _set_reveal_progress(self, value) -> None:
+        self._reveal_progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def _finish_reveal(self) -> None:
+        self._reveal_progress = 1.0
+        self.update()
+
+    def _start_reveal(self) -> None:
+        self._reveal_animation.stop()
+        if not self._blocks or self._edit_mode:
+            self._finish_reveal()
+            return
+
+        duration = motion_duration(SLOW, large_surface=True)
+        if duration <= 0:
+            self._finish_reveal()
+            return
+
+        start = max(0.0, min(1.0, self._reveal_progress))
+        if start >= 1.0:
+            return
+        self._reveal_animation.setDuration(
+            max(MICRO, int(round(duration * (1.0 - start))))
+        )
+        self._reveal_animation.setStartValue(start)
+        self._reveal_animation.setEndValue(1.0)
+        self._reveal_animation.start()
+
+    def _block_reveal_progress(self, index: int) -> float:
+        """Map the shared timeline to a restrained per-block stagger."""
+        overall = max(0.0, min(1.0, self._reveal_progress))
+        count = len(self._blocks)
+        if overall <= 0.0 or count <= 0:
+            return 0.0
+        if overall >= 1.0 or count == 1:
+            return overall
+
+        stagger_span = min(0.34, 0.09 * (count - 1))
+        rank = self._reveal_ranks.get(index, index)
+        start = stagger_span * rank / max(1, count - 1)
+        segment = max(0.01, 1.0 - stagger_span)
+        return max(0.0, min(1.0, (overall - start) / segment))
+
     def show_fade(self) -> None:
-        """显示并淡入，避免覆盖层突然出现。"""
-        self.show()
-        self.setWindowOpacity(0.0)
-        self._fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_animation.setDuration(180)
-        self._fade_animation.setStartValue(0.0)
-        self._fade_animation.setEndValue(1.0)
-        self._fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._fade_animation.start()
+        """Show with one restrained fade and, for new content, a block stagger."""
+        was_hiding = self._hide_animation.state() == QAbstractAnimation.State.Running
+        self._hide_animation.stop()
+
+        duration = motion_duration(BASE, large_surface=True)
+        if duration <= 0:
+            self._fade_animation.stop()
+            self.setWindowOpacity(1.0)
+            if not self.isVisible():
+                self.show()
+            self._start_reveal()
+            self.raise_()
+            self.update()
+            return
+
+        if self.isVisible() and not was_hiding:
+            if self._reveal_progress < 1.0:
+                self._start_reveal()
+            self.raise_()
+            return
+
+        self._fade_animation.stop()
+        if not self.isVisible():
+            self.setWindowOpacity(0.0)
+            self.show()
+
+        start_opacity = max(0.0, min(1.0, self.windowOpacity()))
+        if start_opacity < 1.0:
+            self._fade_animation.setDuration(
+                max(MICRO, int(round(duration * (1.0 - start_opacity))))
+            )
+            self._fade_animation.setStartValue(start_opacity)
+            self._fade_animation.start()
+        else:
+            self.setWindowOpacity(1.0)
+        if self._reveal_progress < 1.0:
+            self._start_reveal()
+        self.raise_()
 
     def hide_fade(self) -> None:
         """隐藏译文时使用短淡出，避免显示/隐藏两套节奏不一致。"""
         if not self.isVisible():
             return
-        self._fade_animation = None
-        self._hide_animation = QPropertyAnimation(self, b"windowOpacity", self)
-        self._hide_animation.setDuration(150)
-        self._hide_animation.setStartValue(self.windowOpacity())
-        self._hide_animation.setEndValue(0.0)
-        self._hide_animation.setEasingCurve(QEasingCurve.Type.InCubic)
-        self._hide_animation.finished.connect(self.hide)
+        self._fade_animation.stop()
+        self._hide_animation.stop()
+        self._reveal_animation.stop()
+
+        duration = motion_duration(FAST, large_surface=True)
+        start_opacity = max(0.0, min(1.0, self.windowOpacity()))
+        if duration <= 0 or start_opacity <= 0.0:
+            self.setWindowOpacity(0.0)
+            self.hide()
+            return
+        self._hide_animation.setDuration(
+            max(MICRO, int(round(duration * start_opacity)))
+        )
+        self._hide_animation.setStartValue(start_opacity)
         self._hide_animation.start()
 
     def apply_style(self) -> None:
+        self._font_cache = {}
         self.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
@@ -117,6 +251,8 @@ class TranslationOverlayWindow(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, not enabled)
         self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, not enabled)
         if enabled:
+            self._reveal_animation.stop()
+            self._finish_reveal()
             self.activateWindow()
             self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.update()
@@ -170,13 +306,36 @@ class TranslationOverlayWindow(QWidget):
         configured_background = QColor(str(self._config.get("overlay.background_color", "#000000")))
 
         for idx, block in enumerate(self._blocks):
+            reveal = self._block_reveal_progress(idx)
+            if reveal <= 0.0:
+                continue
+            painter.save()
+            painter.setOpacity(reveal)
+
             rect = block.rect.adjusted(0.5, 0.5, -0.5, -0.5)
+            if reveal < 1.0:
+                rect.translate(0.0, round((1.0 - reveal) * 4.0))
+                clip_width = rect.width() * (0.74 + 0.26 * reveal)
+                painter.setClipRect(
+                    QRectF(
+                        rect.left() - 1.0,
+                        rect.top() - 1.0,
+                        clip_width + 1.0,
+                        rect.height() + 2.0,
+                    ),
+                    Qt.ClipOperation.IntersectClip,
+                )
             # 极小块：padding 不能吃掉全部绘制空间（否则译文不可见，只剩空块）
             eff_padding = min(padding, max(1, int(rect.height()) // 4))
-            font = self._fit_font(
-                block.text, rect, eff_padding,
-                size_height=self._size_groups.get(idx),
-            )
+            font = self._font_cache.get(idx)
+            if font is None:
+                font = self._fit_font(
+                    block.text,
+                    block.rect.adjusted(0.5, 0.5, -0.5, -0.5),
+                    eff_padding,
+                    size_height=self._size_groups.get(idx),
+                )
+                self._font_cache[idx] = font
             text_rect = rect.adjusted(eff_padding, eff_padding, -eff_padding, -eff_padding)
             # 不再扩展块高度：块保持 OCR 框原尺寸，避免相邻块互相挤压重叠
             # （用户反馈“原文不挤，译文全挤在一起”）。多行文字由 TextDontClip 完整绘制。
@@ -213,6 +372,7 @@ class TranslationOverlayWindow(QWidget):
                 | Qt.TextFlag.TextDontClip,
                 block.text,
             )
+            painter.restore()
 
     def _fit_font(
         self, text: str, rect: QRectF, padding: int, size_height: float | None = None

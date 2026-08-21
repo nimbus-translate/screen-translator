@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,17 @@ DEFAULTS: dict[str, Any] = {
         "save_history": False,
         "history_dir": "",
     },
+    "appearance": {
+        "schema_version": 1,
+        "palette": "warm_paper",
+        "accent": "#2878E8",
+        "motion_profile": "flow",
+        "density": "balanced",
+        "surface": "layered",
+        "reduce_motion": False,
+    },
     "capture": {
-        "select_mask_opacity": 100,
+        "select_mask_opacity": 84,
         "select_border_color": "#2878E8",
     },
     "ocr": {
@@ -105,6 +115,33 @@ def _deep_merge(base: dict, extra: dict) -> dict:
     return base
 
 
+def _normalize_appearance(data: dict[str, Any]) -> None:
+    defaults = DEFAULTS["appearance"]
+    appearance = data.get("appearance")
+    if not isinstance(appearance, dict):
+        data["appearance"] = copy.deepcopy(defaults)
+        return
+
+    allowed = {
+        "palette": {"warm_paper", "mist", "midnight", "system"},
+        "motion_profile": {"flow", "calm", "minimal"},
+        "density": {"spacious", "balanced", "compact"},
+        "surface": {"clean", "layered"},
+    }
+    appearance["schema_version"] = 1
+    for key, values in allowed.items():
+        if appearance.get(key) not in values:
+            appearance[key] = defaults[key]
+
+    accent = str(appearance.get("accent", defaults["accent"])).strip()
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", accent):
+        appearance["accent"] = accent.upper()
+    else:
+        appearance["accent"] = defaults["accent"]
+    if not isinstance(appearance.get("reduce_motion"), bool):
+        appearance["reduce_motion"] = defaults["reduce_motion"]
+
+
 class AppConfig:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path else self._default_path()
@@ -126,6 +163,14 @@ class AppConfig:
                 loaded = json.load(fp)
             if isinstance(loaded, dict):
                 _deep_merge(self.data, loaded)
+                _normalize_appearance(self.data)
+                # This legacy field is retained for compatibility; capture
+                # feedback now reads appearance.accent.  Normalize the red
+                # debug value so old files no longer carry misleading state.
+                capture = self.data.setdefault("capture", {})
+                capture["select_border_color"] = "#2878E8"
+                if capture.get("select_mask_opacity") == 100:
+                    capture["select_mask_opacity"] = 84
         except (json.JSONDecodeError, OSError) as exc:
             backup = self.path.with_suffix(".json.bak")
             try:
