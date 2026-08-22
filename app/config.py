@@ -39,6 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "ocr": {
         "engine": "windows",
         "lang": "auto",
+        "language_mode_version": 2,
         "min_confidence": 0.6,
         "merge_y_tolerance_ratio": 0.3,
         "merge_x_gap_ratio": 0.8,
@@ -169,6 +170,33 @@ def _normalize_translation(data: dict[str, Any]) -> None:
     translation.setdefault("google_free_fallback_to_mymemory", True)
 
 
+def _normalize_ocr(data: dict[str, Any], loaded: dict[str, Any]) -> None:
+    """Migrate the old Chinese-only OCR default to real automatic detection."""
+
+    ocr = data.setdefault("ocr", {})
+    loaded_ocr = loaded.get("ocr") if isinstance(loaded.get("ocr"), dict) else {}
+    legacy_language_mode = "language_mode_version" not in loaded_ocr
+    source_language = str(
+        data.get("translation", {}).get("source_language", "auto") or "auto"
+    ).lower()
+    language = str(ocr.get("lang", "auto") or "auto").lower()
+
+    # v0.1 used ``ch``/``zh`` as a hidden default even when the visible source
+    # selector said "automatic".  That made Windows OCR parse English pages
+    # with the Chinese recognizer and either return garbage or no text.
+    if legacy_language_mode and source_language == "auto" and language in {"ch", "zh"}:
+        language = "auto"
+    elif language == "ch":
+        language = "zh"
+
+    allowed = {
+        "auto", "zh", "zh-hant", "en", "ja", "ko", "fr", "de", "es",
+        "ru", "pt", "it", "vi", "th", "ar",
+    }
+    ocr["lang"] = language if language in allowed else "auto"
+    ocr["language_mode_version"] = 2
+
+
 class AppConfig:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path else self._default_path()
@@ -192,6 +220,7 @@ class AppConfig:
                 _deep_merge(self.data, loaded)
                 _normalize_appearance(self.data)
                 _normalize_translation(self.data)
+                _normalize_ocr(self.data, loaded)
                 # This legacy field is retained for compatibility; capture
                 # feedback now reads appearance.accent.  Normalize the red
                 # debug value so old files no longer carry misleading state.
@@ -199,9 +228,6 @@ class AppConfig:
                 capture["select_border_color"] = "#2878E8"
                 if capture.get("select_mask_opacity") == 100:
                     capture["select_mask_opacity"] = 84
-                ocr = self.data.setdefault("ocr", {})
-                if ocr.get("lang") == "ch":
-                    ocr["lang"] = "zh"
         except (json.JSONDecodeError, OSError) as exc:
             backup = self.path.with_suffix(".json.bak")
             try:

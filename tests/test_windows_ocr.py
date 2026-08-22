@@ -109,6 +109,58 @@ def test_recognize_awaits_winrt_api_and_auto_falls_back_to_next_language(monkeyp
     assert [(line.text, line.box) for line in lines] == [("English", (1, 2, 3, 4))]
 
 
+def test_auto_mode_does_not_stop_on_an_empty_first_result(monkeypatch):
+    calls = []
+
+    def recognize(_image, language):
+        calls.append(language)
+        if language == "zh-Hans-CN":
+            return {"lines": []}
+        return {"lines": [{"text": "English paragraph", "words": []}]}
+
+    engine = windows_ocr.WindowsOCREngine({"lang": "auto"})
+    monkeypatch.setattr(
+        engine, "_load_winocr", lambda: SimpleNamespace(recognize_pil_sync=recognize)
+    )
+
+    lines = engine.recognize(np.zeros((4, 4, 3), dtype=np.uint8))
+
+    assert calls == ["zh-Hans-CN", "en-US"]
+    assert [line.text for line in lines] == ["English paragraph"]
+
+
+def test_auto_mode_uses_installed_language_candidates_and_picks_cleaner_text(monkeypatch):
+    calls = []
+    installed = [
+        SimpleNamespace(language_tag="zh-Hans-CN"),
+        SimpleNamespace(language_tag="ja-JP"),
+    ]
+
+    def recognize(_image, language):
+        calls.append(language)
+        text = {
+            "zh-Hans-CN": "Last Sunday, | had a happy day and ] went home.",
+            "ja-JP": "Last Sunday, I had a happy day and I went home.",
+        }[language]
+        return {"lines": [{"text": text, "words": []}]}
+
+    fake_engine_type = SimpleNamespace(available_recognizer_languages=installed)
+    fake_winocr = SimpleNamespace(
+        OcrEngine=fake_engine_type,
+        recognize_pil_sync=recognize,
+    )
+    engine = windows_ocr.WindowsOCREngine({"lang": "auto"})
+    monkeypatch.setattr(engine, "_load_winocr", lambda: fake_winocr)
+
+    lines = engine.recognize(np.zeros((4, 4, 3), dtype=np.uint8))
+
+    assert calls == ["zh-Hans-CN", "ja-JP"]
+    assert [line.text for line in lines] == [
+        "Last Sunday, I had a happy day and I went home."
+    ]
+    assert engine.last_language_tag == "ja-JP"
+
+
 @pytest.mark.parametrize(
     "image, message",
     [

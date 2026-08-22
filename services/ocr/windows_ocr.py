@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import re
 import sys
 import threading
 from collections.abc import Mapping
@@ -40,6 +41,7 @@ class WindowsOCREngine(OCREngine):
     def __init__(self, ocr_config: dict, app_config=None, logger=None) -> None:
         super().__init__(ocr_config, app_config, logger)
         self._lock = threading.Lock()
+        self.last_language_tag = ""
 
     @classmethod
     def availability_reason(cls) -> str | None:
@@ -116,26 +118,113 @@ class WindowsOCREngine(OCREngine):
         return cls._wait_for_result(recognize(image, language))
 
     @staticmethod
-    def _language_tags(language: str) -> list[str]:
-        # WinRT cannot auto-detect script. Try two practical language packs for
-        # the app's "auto" option; a missing pack advances to the next one.
-        if language == "auto":
+    def _installed_language_tags(winocr: Any) -> list[str]:
+        """Read WinRT OCR language packs without depending on a winocr API."""
+
+        engine_type = getattr(winocr, "OcrEngine", None)
+        try:
+            languages = getattr(engine_type, "available_recognizer_languages", None)
+        except Exception:
+            return []
+        tags: list[str] = []
+        for item in languages or []:
+            tag = str(_field(item, "language_tag", "") or "").strip()
+            if tag and tag.casefold() not in {value.casefold() for value in tags}:
+                tags.append(tag)
+        return tags
+
+    @classmethod
+    def _language_tags(cls, language: str, winocr: Any | None = None) -> list[str]:
+        if language != "auto":
+            return [to_windows_lang(language)]
+
+        installed = cls._installed_language_tags(winocr) if winocr is not None else []
+        if not installed:
+            # Preserve the dependency-agnostic fallback used by tests and by
+            # older winocr builds that do not expose OcrEngine.
             return ["zh-Hans-CN", "en-US"]
-        return [to_windows_lang(language)]
+
+        preferred = ["en-US", "zh-Hans-CN", "ja-JP"]
+        by_folded = {tag.casefold(): tag for tag in installed}
+        ordered = [by_folded[tag.casefold()] for tag in preferred if tag.casefold() in by_folded]
+        ordered.extend(tag for tag in installed if tag not in ordered)
+        # Running every installed language pack can turn one capture into a
+        # multi-second stall. Six covers the common multilingual setups.
+        return ordered[:6]
+
+    @staticmethod
+    def _quality_score(lines: list[OCRLine], language_tag: str) -> float:
+        """Prefer complete, low-noise text when auto mode has several results."""
+
+        text = "\n".join(line.text for line in lines).strip()
+        if not text:
+            return float("-inf")
+        visible = [char for char in text if not char.isspace()]
+        letters = [char for char in text if char.isalpha()]
+        latin = [char for char in letters if char.isascii()]
+        non_latin = len(letters) - len(latin)
+        score = float(len(visible) + len(latin) * 0.35)
+        score += sum(3.0 for line in lines if line.box[2] > 0 and line.box[3] > 0)
+        score -= text.count("\ufffd") * 18.0
+        score -= sum(
+            10.0
+            for line in lines
+            if len([char for char in line.text if char.isalnum()]) <= 1
+        )
+        ordered_y = [
+            line.box[1]
+            for line in lines
+            if line.box[2] > 0
+            and line.box[3] > 0
+            and len([char for char in line.text if char.isalnum()]) >= 4
+        ]
+        # Horizontal Windows OCR normally emits top-to-bottom. A recognizer
+        # that mistakes the page for vertical text often returns the paragraph
+        # in reverse order and inserts stray arrow/glyph lines.
+        score -= sum(
+            14.0
+            for previous, current in zip(ordered_y, ordered_y[1:])
+            if current + 4 < previous
+        )
+
+        # A Latin paragraph recognized through an Asian pack often contains
+        # isolated bars/brackets/CJK glyphs where the pronoun "I" should be.
+        if len(latin) >= max(12, non_latin * 3):
+            score -= non_latin * 4.0
+            score -= len(re.findall(r"(?<!\w)[|｜\[\]《》丨ー](?!\w)", text)) * 6.0
+            if language_tag.casefold().startswith("en"):
+                score += 24.0
+        return score
 
     def recognize(self, image_bgr, lang: str | None = None) -> list[OCRLine]:
         image = self._to_pil_rgb(image_bgr)
         winocr = self._load_winocr()
         language = lang or str(self.config.get("lang", "auto"))
         errors: list[str] = []
+        candidates: list[tuple[float, str, list[OCRLine]]] = []
+        successful_attempt = False
 
-        for tag in self._language_tags(language):
+        for tag in self._language_tags(language, winocr):
             try:
                 with self._lock:
                     result = self._recognize(winocr, image, tag)
-                return self._to_lines(result)
+                successful_attempt = True
+                lines = self._to_lines(result)
+                if language != "auto":
+                    self.last_language_tag = tag
+                    return lines
+                if lines:
+                    candidates.append((self._quality_score(lines, tag), tag, lines))
             except Exception as exc:
                 errors.append(f"{tag}: {exc}")
+
+        if candidates:
+            _score, tag, lines = max(candidates, key=lambda item: item[0])
+            self.last_language_tag = tag
+            return lines
+        if successful_attempt:
+            self.last_language_tag = ""
+            return []
 
         raise RuntimeError(
             "Windows OCR 识别失败。请在 Windows 设置中安装对应的 OCR 语言功能包"

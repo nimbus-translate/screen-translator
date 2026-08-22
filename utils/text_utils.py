@@ -77,6 +77,29 @@ def normalize_ocr_text(text: str) -> str:
     for pattern, replacement in substitutions:
         value = re.sub(pattern, replacement, value, flags=re.IGNORECASE)
 
+    latin_letters = sum(char.isascii() and char.isalpha() for char in value)
+    non_latin_letters = sum(char.isalpha() and not char.isascii() for char in value)
+    if latin_letters >= max(12, non_latin_letters * 3):
+        pronoun_verbs = (
+            r"am|can|could|did|do|felt|finished|got|had|have|hope|need|saw|"
+            r"think|was|watched|went|will|would"
+        )
+        # Asian Windows OCR packs regularly draw the English pronoun I as a
+        # vertical bar, a CJK stroke, or one kana glyph. Limit the repair to a
+        # clearly Latin line followed by a first-person verb.
+        value = re.sub(
+            rf"(?<!\w)[|｜丨ー《》は亅丿](?=\s+(?:{pronoun_verbs})\b)",
+            "I",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(
+            r"([,;:.!?])\s+[|｜丨ー《》は亅丿]\s*$", r"\1 I", value
+        )
+        value = re.sub(r"(?<=[,.;:!?])\s*l(?=\s)", " I", value)
+        value = re.sub(r"\blt\b", "It", value)
+        value = re.sub(r"\bg\s+0t\b", "got", value, flags=re.IGNORECASE)
+
     # 9px 的 “tools” 是 Windows 中文 OCR 的重灾区：0/O、1/l 和小图标
     # 会随机混进来。只在 no/with 上下文修，避免误伤普通数字。
     value = re.sub(

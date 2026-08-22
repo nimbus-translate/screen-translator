@@ -26,6 +26,30 @@ def test_merge_partial(tmp_path):
     assert config.get("appearance.density") == "balanced"
 
 
+def test_legacy_chinese_default_migrates_to_real_auto_mode(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"ocr":{"lang":"zh"},"translation":{"source_language":"auto"}}',
+        encoding="utf-8",
+    )
+
+    config = AppConfig(path)
+
+    assert config.get("ocr.lang") == "auto"
+    assert config.get("ocr.language_mode_version") == 2
+
+
+def test_explicit_versioned_ocr_language_is_preserved(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"ocr":{"lang":"zh","language_mode_version":2},'
+        '"translation":{"source_language":"auto"}}',
+        encoding="utf-8",
+    )
+
+    assert AppConfig(path).get("ocr.lang") == "zh"
+
+
 def test_legacy_google_free_speed_settings_are_normalized(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(

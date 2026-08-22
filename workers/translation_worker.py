@@ -54,6 +54,15 @@ class PipelineTask(QThread):
             lines = self.ocr_engine.recognize(
                 image, lang=str(self.config.get("ocr.lang", "auto"))
             )
+            # Upscaling normally helps small text, but some Windows OCR packs
+            # occasionally return an empty result for the resized bitmap. Retry
+            # the untouched capture before telling the user there is no text.
+            if not lines and scale != 1.0:
+                image = self.capture.image
+                scale = 1.0
+                lines = self.ocr_engine.recognize(
+                    image, lang=str(self.config.get("ocr.lang", "auto"))
+                )
             if self._stop:
                 return
             for line in lines:

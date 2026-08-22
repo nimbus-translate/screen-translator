@@ -1010,8 +1010,18 @@ class Application(QObject):
         if service:
             self.config.set("translation.service", service)
             self.config.set("translation.auto_select_service", False)
+        previous_source = str(
+            self.config.get("translation.source_language", "auto") or "auto"
+        )
         if source:
             self.config.set("translation.source_language", source)
+            # The main window exposes the source language but not the advanced
+            # OCR-language selector.  Keep them aligned when the user actually
+            # changes the visible source selector; stale Chinese-only settings
+            # must not silently poison English screenshots.
+            if source != previous_source:
+                self.config.set("ocr.lang", source)
+                self.config.set("ocr.language_mode_version", 2)
         if target:
             self.config.set("translation.target_language", target)
         self.config.save()

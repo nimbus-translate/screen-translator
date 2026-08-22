@@ -78,3 +78,15 @@ def test_normalize_tiny_english_table_ocr_confusions():
     assert normalize_ocr_text("excites LIS most") == "excites us most"
     assert normalize_ocr_text("testing 飞 it took on complex 卜 long-horizon work tO agents") == "testing, it took on complex, long-horizon work to agents"
     assert normalize_ocr_text("testing ， it took on complex ， long-horizon") == "testing, it took on complex, long-horizon"
+
+
+def test_normalize_latin_paragraph_pronoun_glyphs_from_asian_ocr_pack():
+    assert normalize_ocr_text(
+        "Last Sunday, | had a happy day. Then 丨 went home."
+    ) == "Last Sunday, I had a happy day. Then I went home."
+    assert normalize_ocr_text(
+        "After dinner, 《 watched a movie and | felt very happy."
+    ) == "After dinner, I watched a movie and I felt very happy."
+    assert normalize_ocr_text("ln the morning, I got up. lt was early.") == (
+        "In the morning, I got up. It was early."
+    )
