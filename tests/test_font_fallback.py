@@ -72,27 +72,20 @@ def test_fit_font_shrinks_for_small_rect(app):
     assert font.pointSize() < int(window._config.get("overlay.font_size", 18))
 
 
-def test_fit_font_allows_below_configured_min_for_tiny_rect(app):
-    """极小按钮：配置下限 8pt 仍放不下时允许压到更低（硬下限 5pt）。"""
+def test_fit_font_never_drops_below_readable_minimum(app):
+    """译文再长也不能退化成截图里那种 5pt 蚂蚁字。"""
     window = _build_window(app, "")
     window._config.set("overlay.min_font_size", 8)
     font = _fit(window, "包围所有敌人并且开始攻击", 60, 16)
-    assert font.pointSize() <= 8
-    assert font.pointSize() >= 3
+    assert font.pointSize() >= 8
 
 
-def test_fit_font_wraps_long_text_in_narrow_rect(app):
+def test_fit_font_preserves_height_and_condenses_long_text(app):
     window = _build_window(app, "")
-    font = _fit(window, "这是一段比较长的翻译文本需要自动换行显示", 90, 40)
-    from PySide6.QtGui import QFontMetrics
-
-    metrics = QFontMetrics(font)
-    bounds = metrics.boundingRect(
-        0, 0, 90 - 8, 100000, __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.TextFlag.TextWordWrap,
-        "这是一段比较长的翻译文本需要自动换行显示",
-    )
-    # 换行后高度受新预算约束（块高 40 - 2 = 38，至少单行）
-    assert bounds.height() <= max(38, metrics.height())
+    short = _fit(window, "翻译完成", 90, 40)
+    long = _fit(window, "这是一段比较长的翻译文本需要自动换行显示", 90, 40)
+    assert long.pointSize() == short.pointSize()
+    assert long.stretch() < short.stretch()
 
 
 def test_fit_font_scales_with_block_height(app):
@@ -125,3 +118,35 @@ def test_size_groups_unify_same_level_font(app):
     assert fonts[0] == fonts[1] == fonts[2]
     assert fonts[3] == fonts[4]
     assert fonts[0] != fonts[3]
+
+
+def test_auto_background_fully_erases_source_and_clips_text(app):
+    """自动底色必须覆盖 OCR 框外沿，译文也不能画出擦除区。"""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QImage
+    from ui.translation_overlay import Block
+
+    window = _build_window(app, "")
+    window.resize(100, 60)
+    window._config.set("overlay.auto_background", True)
+    window._config.set("overlay.background_alpha", 1)
+    window.set_blocks(
+        [
+            Block(
+                QRectF(20, 20, 40, 16),
+                "这是一段很长但不能漏出背景框的译文",
+                QColor("#000000"),
+                "#FFFFFF",
+            )
+        ]
+    )
+    window._reveal_progress = 1.0
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+
+    window.render(image)
+
+    assert image.pixelColor(19, 19).alpha() == 255
+    assert image.pixelColor(10, 10).alpha() == 0
+    assert image.pixelColor(75, 28).alpha() == 0
+    window.deleteLater()

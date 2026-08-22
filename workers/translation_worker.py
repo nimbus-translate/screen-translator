@@ -17,6 +17,7 @@ from utils.image_utils import (
     sanitize_background,
 )
 from utils.layout_utils import ocr_lines_to_regions
+from utils.language_utils import needs_translation
 from utils.text_utils import clean_text, protect_texts, restore_texts
 
 log = get_logger("worker")
@@ -88,12 +89,15 @@ class PipelineTask(QThread):
             # 整图页面基调色，用于交叉校验块级背景识别
             global_background = dominant_color(self.capture.image)
             for region in regions:
+                # Windows OCR 的框通常紧贴字形；向外采一小圈，避免把黑色
+                # 笔画误判成背景，也与覆盖层的原字擦除范围保持一致。
+                sample_margin = max(2, min(6, int(round(region.height * 0.18))))
                 background_hex, text_hex, lum = detect_colors(
                     self.capture.image,
-                    region.x - self.capture.offset_x,
-                    region.y - self.capture.offset_y,
-                    region.width,
-                    region.height,
+                    region.x - self.capture.offset_x - sample_margin,
+                    region.y - self.capture.offset_y - sample_margin,
+                    region.width + sample_margin * 2,
+                    region.height + sample_margin * 2,
                 )
                 region.source_luminance = lum
                 region.background_color = sanitize_background(background_hex, global_background)
@@ -107,14 +111,31 @@ class PipelineTask(QThread):
             texts = [region.text for region in regions]
             # 同批去重：重复文本只请求一次，减少免费服务限流压力
             unique_texts = list(dict.fromkeys(texts))
-            protected, mapping = protect_texts(unique_texts)
-            translated = self.translator.translate(protected, source, target)
-            restored_unique = [clean_text(text) for text in restore_texts(translated, mapping)]
-            restored_map = dict(zip(unique_texts, restored_unique))
+            translatable = [
+                text for text in unique_texts if needs_translation(text, target)
+            ]
+            # 图标、文件名以及已经是目标语言的文字保持原样。旧逻辑把中文
+            # 中文再翻一遍、把文件夹图标“O/0”翻成方块，是整页发脏的主因。
+            restored_map = {text: text for text in unique_texts}
+            failed = 0
+            if translatable:
+                protected, mapping = protect_texts(translatable)
+                translated = self.translator.translate(protected, source, target)
+                restored_unique = [
+                    clean_text(text)
+                    for text in restore_texts(translated, mapping)
+                ]
+                restored_map.update(zip(translatable, restored_unique))
+                failed = getattr(self.translator, "last_failed_count", 0)
             restored = [restored_map[text] for text in texts]
 
             if self.config.get("translation.keep_original", False):
-                restored = [f"{original}\n{translated_text}" for original, translated_text in zip(texts, restored)]
+                restored = [
+                    f"{original}\n{translated_text}"
+                    if translated_text.strip() != original.strip()
+                    else original
+                    for original, translated_text in zip(texts, restored)
+                ]
 
             if self._stop:
                 return
@@ -122,10 +143,9 @@ class PipelineTask(QThread):
             for region, translated_text in zip(regions, restored):
                 region.translated_text = translated_text
 
-            failed = getattr(self.translator, "last_failed_count", 0)
             if failed:
                 self._emit_status(f"翻译完成：{failed} 个文本块失败，已保留原文")
-            if getattr(self.translator, "unsupported_direction", False):
+            if translatable and getattr(self.translator, "unsupported_direction", False):
                 self._emit_status(
                     "Mock 演示翻译只支持输出中文，当前目标语言下仅保留原文；"
                     "请在 设置 → 翻译 中填写 OpenAI/DeepL/Google API Key 使用真实翻译"

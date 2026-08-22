@@ -799,14 +799,14 @@ class Application(QObject):
         # Preserve the previous translation until a new result actually exists;
         # that lets cancellation/OCR errors restore it without stale ghost windows.
         self.overlay_manager.clear_all()
-        self.overlay_manager.show_regions(capture, regions)
-        self._sync_overlay_state(True)
+        overlay_visible = self.overlay_manager.show_regions(capture, regions)
+        self._sync_overlay_state(overlay_visible)
         self._pipeline_succeeded = True
         if failed_count:
             self.set_status(f"翻译服务限流：已显示 {len(regions)} 个原文块，请稍后重试或切换翻译服务")
         else:
             self.set_status(f"翻译完成：{len(regions)} 个文本块")
-        self.floating_status.set_text("✓ 翻译完成")
+        self.floating_status.set_text("翻译完成")
         self._save_history(capture, regions)
 
     # ------------------------------------------------------------------ overlay

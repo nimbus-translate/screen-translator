@@ -325,8 +325,11 @@ class TranslationOverlayWindow(QWidget):
                     ),
                     Qt.ClipOperation.IntersectClip,
                 )
-            # 极小块：padding 不能吃掉全部绘制空间（否则译文不可见，只剩空块）
-            eff_padding = min(padding, max(1, int(rect.height()) // 4))
+            # OCR 框通常只包住字形本身。背景必须略微外扩，才能把原字的
+            # 抗锯齿、阴影和下划线一起擦干净；往里缩会留下截图里那圈碎点。
+            background_rect = self._source_erase_rect(rect)
+            # 横向留一点呼吸即可，纵向不再吃掉本就很紧的 OCR 行高。
+            eff_padding = min(padding, max(1, int(rect.height()) // 6))
             font = self._font_cache.get(idx)
             if font is None:
                 font = self._fit_font(
@@ -336,9 +339,9 @@ class TranslationOverlayWindow(QWidget):
                     size_height=self._size_groups.get(idx),
                 )
                 self._font_cache[idx] = font
-            text_rect = rect.adjusted(eff_padding, eff_padding, -eff_padding, -eff_padding)
-            # 不再扩展块高度：块保持 OCR 框原尺寸，避免相邻块互相挤压重叠
-            # （用户反馈“原文不挤，译文全挤在一起”）。多行文字由 TextDontClip 完整绘制。
+            text_rect = background_rect.adjusted(
+                eff_padding, 0.0, -eff_padding, 0.0
+            )
 
             if auto_background:
                 if block.background:
@@ -349,10 +352,20 @@ class TranslationOverlayWindow(QWidget):
                     background = QColor("#FFFFFF" if block.color.lightness() < 128 else "#000000")
             else:
                 background = QColor(configured_background)
-            background.setAlpha(int(self._config.get("overlay.background_alpha", 160)))
+            # 自动取色的覆盖层承担的是“替换原字”，半透明会把原文重新透
+            # 出来形成重影。手动底色仍尊重用户设置的透明度。
+            background.setAlpha(
+                255
+                if auto_background
+                else int(self._config.get("overlay.background_alpha", 160))
+            )
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(background)
-            painter.drawRoundedRect(rect, radius, radius)
+            if auto_background:
+                # 圆角会漏出 OCR 框四角的原字像素，自动替换时必须完整擦除。
+                painter.drawRect(background_rect)
+            else:
+                painter.drawRoundedRect(background_rect, radius, radius)
 
             if (
                 bool(self._config.get("overlay.show_border", True))
@@ -360,19 +373,33 @@ class TranslationOverlayWindow(QWidget):
             ):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(border_color, 1))
-                painter.drawRoundedRect(rect, radius, radius)
+                painter.drawRoundedRect(background_rect, radius, radius)
 
             painter.setFont(font)
             painter.setPen(block.color)
+            painter.setClipRect(
+                background_rect, Qt.ClipOperation.IntersectClip
+            )
+            text_flags = (
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+            if "\n" in block.text:
+                text_flags |= Qt.TextFlag.TextWordWrap
+            else:
+                text_flags |= Qt.TextFlag.TextSingleLine
             painter.drawText(
                 text_rect,
-                Qt.AlignmentFlag.AlignLeft
-                | Qt.AlignmentFlag.AlignVCenter
-                | Qt.TextFlag.TextWordWrap
-                | Qt.TextFlag.TextDontClip,
+                text_flags,
                 block.text,
             )
             painter.restore()
+
+    def _source_erase_rect(self, rect: QRectF) -> QRectF:
+        """Return a small, bounded overscan rect that fully hides source glyphs."""
+
+        margin = max(2.0, min(5.0, rect.height() * 0.14))
+        expanded = rect.adjusted(-margin, -margin, margin, margin)
+        return expanded.intersected(QRectF(self.rect()))
 
     def _fit_font(
         self, text: str, rect: QRectF, padding: int, size_height: float | None = None
@@ -380,39 +407,29 @@ class TranslationOverlayWindow(QWidget):
         families = self._font_families()
         pref_size = int(self._config.get("overlay.font_size", 18))
         min_size = int(self._config.get("overlay.min_font_size", 8))
-        max_width = max(1, int(rect.width()) - 2 * padding)
         # 组内统一高度：消除 OCR 框高噪声造成的同级字号参差
         height = size_height if size_height is not None else rect.height()
 
-        # 极小按钮/标签：配置下限仍放不下时允许继续压到更低硬下限
-        floor_size = max(3, min_size - 3)
         # 目标字号：匹配原文字号。OCR 框高 ≈ 原文行高（含行距），实际文字
         # 字形高 ≈ 框高 * 0.75；pt = 字形高 / 1.333，故 target ≈ 框高 * 0.56。
-        # 之前按 0.70/行高≤框高会让译文文字撑满含 padding 的框，比原文大、
-        # 行距被吃光 → 相邻块视觉挤压（用户：原文不挤译文挤）。
         raw = max(min_size, min(pref_size, int(round(height * 0.56))))
-        _STEPS = (8, 10, 12, 14, 16, 18, 22)
-        target = min(_STEPS, key=lambda step: abs(step - raw)) if raw >= 8 else raw
-        # 从目标档位按档位递减（10→8→floor），跳过 9/11 这类怪值
-        candidates = [step for step in reversed(_STEPS) if step <= target]
-        if target < 8:
-            candidates = [target]
-        candidates.append(floor_size)
-        for size in candidates:
+        # 译文长度不能决定字号。旧逻辑只要多换一行就一路缩到 5pt，造成
+        # 同一页面上字号完全失真。这里只按原 OCR 行高选字号，并以字体
+        # 横向压缩消化正常的翻译长度差异。
+        height_budget = max(1, int(round(height)) + 1)
+        font = self._make_font(families, raw)
+        for size in range(raw, min_size - 1, -1):
             font = self._make_font(families, size)
-            metrics = QFontMetrics(font)
-            bounds = metrics.boundingRect(
-                0, 0, max_width, 100000, Qt.TextFlag.TextWordWrap, text
-            )
-            # 严格约束：字号行高不得超过块高（OCR 框高 ≈ 原文行高）。
-            # 之前允许行高超框会让译文比原文大、块高度被撑开、相邻块互相重叠，
-            # 用户反馈“大了之后就会互相重叠”。多行长文本由 paintEvent 扩展块高兜底。
-            # 预算用组统一高度（+1 容忍行间距），同组块即使实际框高差 1px
-            # 也落到同一档位，不再 8/10pt 参差
-            height_budget = int(height) + 1
-            if bounds.height() <= height_budget and bounds.width() <= max_width:
-                return font
-        return self._make_font(families, floor_size)
+            if QFontMetrics(font).height() <= height_budget:
+                break
+
+        if "\n" not in text:
+            max_width = max(1, int(rect.width()) - 2 * padding)
+            natural_width = QFontMetrics(font).horizontalAdvance(text)
+            if natural_width > max_width:
+                stretch = max(50, min(100, int(round(100 * max_width / natural_width))))
+                font.setStretch(stretch)
+        return font
 
     def _font_families(self) -> list[str]:
         """字体回退链：自定义字体在前，CJK 字体兜底，避免中文/日文/韩文变豆腐块。"""
