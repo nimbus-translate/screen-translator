@@ -32,6 +32,16 @@ _TECHNICAL_FILE_RE = re.compile(
     re.IGNORECASE,
 )
 _HEX_ID_RE = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
+_BRAND_LOGO_RE = re.compile(
+    r"^(?:[0O]\s*)?(?:Claude|Cursor|GitHub|Stripe|Spotify|Bridgewater|Banner\s+Health)"
+    r"(?:[®™])?$",
+    re.IGNORECASE,
+)
+_BENCHMARK_NAME_RE = re.compile(
+    r"(?:bench(?:mark)?|GDP(?:val)?|OSWorld|FrontierCode|"
+    r"Humanity['’]?s Last Exam|Codex CLI|Gemini CLI)",
+    re.IGNORECASE,
+)
 
 
 def needs_translation(text: str, target_language: str) -> bool:
@@ -47,10 +57,24 @@ def needs_translation(text: str, target_language: str) -> bool:
         return False
     if _HEX_ID_RE.fullmatch(value):
         return False
+    if _BRAND_LOGO_RE.fullmatch(value):
+        return False
+    if value.casefold() == "xhigh":
+        return False
+    # 表格里的基准/产品标识不是自然语言。翻它们既浪费请求，又容易把
+    # SWE-Bench、GDPval-AA 之类弄成一坨假中文。
+    latin_words = re.findall(r"[A-Za-z0-9]+", value)
+    if len(value) <= 64 and len(latin_words) <= 5 and _BENCHMARK_NAME_RE.search(value):
+        return False
 
     target = (target_language or "").lower()
     if target == "zh" and any("\u3400" <= char <= "\u9fff" for char in value):
-        return False
+        # 刷新残缺覆盖层时可能拿到“少量中文 + 一整段残留英文”。旧逻辑
+        # 只要看见一个汉字就整块跳过，导致半中半英永远修不回来。
+        remaining_latin_words = re.findall(r"[A-Za-z]{2,}", value)
+        latin_count = sum(len(word) for word in remaining_latin_words)
+        han_count = sum("\u3400" <= char <= "\u9fff" for char in value)
+        return len(remaining_latin_words) >= 4 and latin_count >= max(16, han_count * 2)
     if target.startswith("ja") and any(
         "\u3040" <= char <= "\u30ff" for char in value
     ):

@@ -16,9 +16,9 @@ from utils.image_utils import (
     resize_for_ocr,
     sanitize_background,
 )
-from utils.layout_utils import ocr_lines_to_regions
+from utils.layout_utils import merge_wrapped_labels, ocr_lines_to_regions
 from utils.language_utils import needs_translation
-from utils.text_utils import clean_text, protect_texts, restore_texts
+from utils.text_utils import clean_text, normalize_ocr_text, protect_texts, restore_texts
 
 log = get_logger("worker")
 
@@ -57,7 +57,7 @@ class PipelineTask(QThread):
             if self._stop:
                 return
             for line in lines:
-                line.text = clean_text(line.text)
+                line.text = normalize_ocr_text(clean_text(line.text))
             if scale != 1.0:
                 for line in lines:
                     x, y, w, h = line.box
@@ -83,6 +83,13 @@ class PipelineTask(QThread):
                 self.error.emit("没有识别到文字（置信度过滤后为空）")
                 return
 
+            target = str(self.config.get("translation.target_language", "zh"))
+            regions = merge_wrapped_labels(
+                regions,
+                target_language=target,
+                capture_width=self.capture.bbox[2] - self.capture.bbox[0],
+            )
+
             # 背景亮度 -> 自动文字颜色
             auto_color = bool(self.config.get("overlay.use_auto_text_color", True))
             default_color = str(self.config.get("overlay.text_color", "#FFFFFF"))
@@ -107,7 +114,6 @@ class PipelineTask(QThread):
 
             self._emit_status(f"正在翻译 {len(regions)} 个文本块...")
             source = str(self.config.get("translation.source_language", "auto"))
-            target = str(self.config.get("translation.target_language", "zh"))
             texts = [region.text for region in regions]
             # 同批去重：重复文本只请求一次，减少免费服务限流压力
             unique_texts = list(dict.fromkeys(texts))
@@ -152,7 +158,16 @@ class PipelineTask(QThread):
                 )
 
             self._emit_status("正在生成覆盖层...")
-            self.result.emit({"capture": self.capture, "regions": regions, "failed_count": failed})
+            self.result.emit(
+                {
+                    "capture": self.capture,
+                    "regions": regions,
+                    "recognized_count": len(regions),
+                    "translation_candidate_count": len(translatable),
+                    "translated_count": max(0, len(translatable) - failed),
+                    "failed_count": failed,
+                }
+            )
         except TranslationError as exc:
             self.error.emit(str(exc))
         except Exception as exc:

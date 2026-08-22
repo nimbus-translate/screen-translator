@@ -26,6 +26,22 @@ def test_merge_partial(tmp_path):
     assert config.get("appearance.density") == "balanced"
 
 
+def test_legacy_google_free_speed_settings_are_normalized(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"translation":{"google_free_max_workers":8,'
+        '"google_free_interval":0,"google_free_partial_retries":2}}',
+        encoding="utf-8",
+    )
+
+    config = AppConfig(path)
+
+    assert config.get("translation.google_free_max_workers") == 4
+    assert config.get("translation.google_free_interval") == 0.05
+    assert config.get("translation.google_free_partial_retries") == 0
+    assert config.get("translation.google_free_fallback_to_mymemory") is True
+
+
 def test_save_load_roundtrip(tmp_path):
     path = tmp_path / "config.json"
     config = AppConfig(path)

@@ -139,3 +139,54 @@ def test_translate_batch_line_mismatch_falls_back(monkeypatch):
     assert result == ["译:a", "译:b"]
     # 1 次合并请求 + 2 次逐条兜底
     assert len(calls) == 3
+
+
+def test_translate_batch_retries_unchanged_items_individually(monkeypatch):
+    calls = []
+
+    def fake_get(url, params, timeout):
+        text = params["q"]
+        calls.append(text)
+        if "\n" in text:
+            return FakeResponse(
+                {
+                    "responseData": {
+                        "translatedText": "已翻译\nFlexible by design"
+                    },
+                    "responseStatus": 200,
+                }
+            )
+        return FakeResponse(
+            {"responseData": {"translatedText": "灵活设计"}, "responseStatus": 200}
+        )
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    translator = MyMemoryTranslator({}, None)
+
+    assert translator.translate(
+        ["Translated", "Flexible by design"], "auto", "zh"
+    ) == ["已翻译", "灵活设计"]
+    assert calls == ["Translated\nFlexible by design", "Flexible by design"]
+    assert translator.last_failed_count == 0
+
+
+def test_translate_batch_does_not_cache_unchanged_item(monkeypatch, tmp_path):
+    from services.translation.cache import TranslationCache
+
+    def fake_get(url, params, timeout):
+        return FakeResponse(
+            {
+                "responseData": {"translatedText": params["q"]},
+                "responseStatus": 200,
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    cache = TranslationCache(tmp_path / "cache.json")
+    translator = MyMemoryTranslator({}, cache)
+
+    assert translator.translate(["Flexible by design"], "auto", "zh") == [
+        "Flexible by design"
+    ]
+    assert translator.last_failed_count == 1
+    assert cache.get("auto", "zh", "Flexible by design") is None

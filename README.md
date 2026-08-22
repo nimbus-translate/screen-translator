@@ -2,7 +2,7 @@
 
 > A lightweight Windows desktop translator: capture any region, recognize text with Windows OCR or optional PaddleOCR, translate it, and place the result back over the original content.
 
-> **v0.2.5:** the lightweight edition uses Windows OCR by default. PaddleOCR and its models are an optional, checksum- and signature-verified component downloaded from Settings only when requested. Tagged release installers must be code-signed and stay below 200,000,000 bytes.
+> **v0.2.5-beta:** this prerelease replaces the incorrect v0.2.5 code. It fixes OCR text-block coverage, paragraph translation, natural font sizing, color matching, overlay layout, translation latency, and failure handling. Windows OCR remains the lightweight default.
 
 ## Why ScreenTranslator
 
@@ -210,7 +210,7 @@ python -m pytest tests -v
 
 ```powershell
 python -m pip install -r requirements-core.txt pyinstaller
-.\scripts\build_lite.ps1 -Version 0.2.5
+.\scripts\build_lite.ps1 -Version 0.2.5-beta
 ```
 
 脚本先用 `build-lite.spec` 生成 `dist\ScreenTranslator-Lite.exe`，再调用 Inno Setup 6 生成安装器。构建会拒绝大于或等于 200,000,000 bytes 的安装包。轻量归档明确排除 Paddle、PaddleX、OpenCV、SciPy、scikit-learn 和 Torch。
@@ -218,10 +218,10 @@ python -m pip install -r requirements-core.txt pyinstaller
 只构建 EXE：
 
 ```powershell
-.\scripts\build_lite.ps1 -Version 0.2.5 -SkipInstaller
+.\scripts\build_lite.ps1 -Version 0.2.5-beta -SkipInstaller
 ```
 
-传统完整包仍可用 `python -m PyInstaller build.spec --noconfirm` 构建，但不作为 v0.2.5 的默认下载。
+传统完整包仍可用 `python -m PyInstaller build.spec --noconfirm` 构建，但不作为 v0.2.5-beta 的默认下载。
 
 ### 代码签名与发布
 
@@ -289,7 +289,7 @@ Add-WindowsCapability -Online -Name "Language.OCR~~~en-US~0.0.1.0"
 
 ## 路线图
 
-- **v0.2.5：轻量安装与首次体验。** Windows OCR 默认、Paddle 按需组件、下载进度、更新、签名与诊断导出。
+- **v0.2.5-beta：覆盖层修复版。** 修复 OCR 文本块覆盖、段落翻译、自然字号与颜色匹配，并改进翻译速度和失败恢复。
 - **v0.3：连续区域翻译。** 框选一次后检测画面变化，只在字幕变化时 OCR，并用前文作为翻译上下文。
 - **v0.4：场景预设与术语表。** 游戏字幕、视觉小说、漫画竖排、视频字幕等受控预设，以及术语记忆。
 - **v1.0：签名、更新与稳定性。** 完整发布治理、长期运行可靠性与自然覆盖效果。

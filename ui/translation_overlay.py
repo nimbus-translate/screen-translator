@@ -38,6 +38,8 @@ class Block:
     text: str
     color: QColor
     background: str = ""
+    source_line_height: float = 0.0
+    source_line_count: int = 1
 
 
 class TranslationOverlayWindow(QWidget):
@@ -110,21 +112,69 @@ class TranslationOverlayWindow(QWidget):
         self._size_groups = {}
         if not self._blocks:
             return
+        assigned: set[int] = set()
+
+        # 同一导航栏/表格行的字号应该一致。OCR 会把 Policy 识别成 23px、
+        # 邻项识别成 16px；仅按框高聚类就会出现一排字忽大忽小。先按顶边、
+        # 明暗背景和合理高度比组行，再用该行中位高度统一字号。
+        rows: list[list[int]] = []
+        for idx in sorted(
+            range(len(self._blocks)),
+            key=lambda i: (self._blocks[i].rect.top(), self._blocks[i].rect.left()),
+        ):
+            height = self._font_reference_height(self._blocks[idx])
+            dark = self._has_dark_background(self._blocks[idx])
+            placed = False
+            for row in rows:
+                first = self._blocks[row[0]]
+                heights = [self._font_reference_height(self._blocks[i]) for i in row]
+                if (
+                    abs(self._blocks[idx].rect.top() - first.rect.top()) <= 4
+                    and dark == self._has_dark_background(first)
+                    and max(heights + [height]) / max(1.0, min(heights + [height])) <= 1.8
+                ):
+                    row.append(idx)
+                    placed = True
+                    break
+            if not placed:
+                rows.append([idx])
+
+        for row in rows:
+            if len(row) < 2:
+                continue
+            heights = sorted(self._font_reference_height(self._blocks[i]) for i in row)
+            median_height = heights[len(heights) // 2]
+            for idx in row:
+                self._size_groups[idx] = median_height
+                assigned.add(idx)
+
         indexed = sorted(
-            range(len(self._blocks)), key=lambda i: self._blocks[i].rect.height()
+            (i for i in range(len(self._blocks)) if i not in assigned),
+            key=lambda i: self._font_reference_height(self._blocks[i]),
         )
         groups: list[list[int]] = []
         for idx in indexed:
-            height = self._blocks[idx].rect.height()
-            if groups and height - self._blocks[groups[-1][0]].rect.height() <= 4:
+            height = self._font_reference_height(self._blocks[idx])
+            if groups and height - self._font_reference_height(self._blocks[groups[-1][0]]) <= 4:
                 groups[-1].append(idx)
             else:
                 groups.append([idx])
         for group in groups:
-            heights = sorted(self._blocks[i].rect.height() for i in group)
+            heights = sorted(self._font_reference_height(self._blocks[i]) for i in group)
             median_height = heights[len(heights) // 2]
             for idx in group:
                 self._size_groups[idx] = median_height
+
+    @staticmethod
+    def _font_reference_height(block: Block) -> float:
+        return block.source_line_height or block.rect.height()
+
+    @staticmethod
+    def _has_dark_background(block: Block) -> bool:
+        background = QColor(block.background)
+        if block.background and background.isValid():
+            return background.lightness() < 128
+        return block.color.lightness() >= 128
 
     def _compute_reveal_order(self) -> None:
         """Reveal in visual reading order without changing the block list."""
@@ -332,11 +382,13 @@ class TranslationOverlayWindow(QWidget):
             eff_padding = min(padding, max(1, int(rect.height()) // 6))
             font = self._font_cache.get(idx)
             if font is None:
+                multiline = block.source_line_count > 1 or "\n" in block.text
                 font = self._fit_font(
                     block.text,
                     block.rect.adjusted(0.5, 0.5, -0.5, -0.5),
                     eff_padding,
                     size_height=self._size_groups.get(idx),
+                    multiline=multiline,
                 )
                 self._font_cache[idx] = font
             text_rect = background_rect.adjusted(
@@ -380,13 +432,18 @@ class TranslationOverlayWindow(QWidget):
             painter.setClipRect(
                 background_rect, Qt.ClipOperation.IntersectClip
             )
-            text_flags = (
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-            )
-            if "\n" in block.text:
-                text_flags |= Qt.TextFlag.TextWordWrap
+            if block.source_line_count > 1 or "\n" in block.text:
+                text_flags = (
+                    Qt.AlignmentFlag.AlignLeft
+                    | Qt.AlignmentFlag.AlignTop
+                    | Qt.TextFlag.TextWordWrap
+                )
             else:
-                text_flags |= Qt.TextFlag.TextSingleLine
+                text_flags = (
+                    Qt.AlignmentFlag.AlignLeft
+                    | Qt.AlignmentFlag.AlignVCenter
+                    | Qt.TextFlag.TextSingleLine
+                )
             painter.drawText(
                 text_rect,
                 text_flags,
@@ -402,33 +459,59 @@ class TranslationOverlayWindow(QWidget):
         return expanded.intersected(QRectF(self.rect()))
 
     def _fit_font(
-        self, text: str, rect: QRectF, padding: int, size_height: float | None = None
+        self,
+        text: str,
+        rect: QRectF,
+        padding: int,
+        size_height: float | None = None,
+        multiline: bool = False,
     ) -> QFont:
         families = self._font_families()
         pref_size = int(self._config.get("overlay.font_size", 18))
-        min_size = int(self._config.get("overlay.min_font_size", 8))
+        configured_min_size = int(self._config.get("overlay.min_font_size", 8))
         # 组内统一高度：消除 OCR 框高噪声造成的同级字号参差
         height = size_height if size_height is not None else rect.height()
 
-        # 目标字号：匹配原文字号。OCR 框高 ≈ 原文行高（含行距），实际文字
-        # 字形高 ≈ 框高 * 0.75；pt = 字形高 / 1.333，故 target ≈ 框高 * 0.56。
-        raw = max(min_size, min(pref_size, int(round(height * 0.56))))
+        # 8~12px 小字框若仍强制 8pt，字体行高会比 OCR 框还高，必然溢出。
+        # 正常文本仍尊重用户配置；只有真正的小字框才允许降到 5~7pt。
+        min_size = configured_min_size
+        if height < 16:
+            min_size = max(5, min(configured_min_size, int(round(height * 0.56))))
+
+        # 自动背景模式承担的是原位替换，字号必须跟原 OCR 行高走。旧版把
+        # font_size=18 当硬上限，大标题永远被画小；现在只把它当普通字号基准，
+        # 标题可按源行高自然放大，但不超过 36pt（用户设得更大则尊重设置）。
+        auto_max_size = max(pref_size, 36) if bool(
+            self._config.get("overlay.auto_background", True)
+        ) else pref_size
+        raw = max(min_size, min(auto_max_size, int(round(height * 0.72))))
         # 译文长度不能决定字号。旧逻辑只要多换一行就一路缩到 5pt，造成
         # 同一页面上字号完全失真。这里只按原 OCR 行高选字号，并以字体
         # 横向压缩消化正常的翻译长度差异。
         height_budget = max(1, int(round(height)) + 1)
+        max_width = max(1, int(rect.width()) - 2 * padding)
+        total_height_budget = max(1, int(rect.height()) + 1)
         font = self._make_font(families, raw)
         for size in range(raw, min_size - 1, -1):
             font = self._make_font(families, size)
-            if QFontMetrics(font).height() <= height_budget:
+            metrics = QFontMetrics(font)
+            if metrics.height() > height_budget:
+                continue
+            if multiline:
+                bounds = metrics.boundingRect(
+                    0,
+                    0,
+                    max_width,
+                    max(1, total_height_budget),
+                    int(Qt.TextFlag.TextWordWrap),
+                    text,
+                )
+                if bounds.height() > total_height_budget:
+                    continue
+            elif metrics.horizontalAdvance(text) > max_width and size > min_size:
+                continue
+            if metrics.height() <= height_budget:
                 break
-
-        if "\n" not in text:
-            max_width = max(1, int(rect.width()) - 2 * padding)
-            natural_width = QFontMetrics(font).horizontalAdvance(text)
-            if natural_width > max_width:
-                stretch = max(50, min(100, int(round(100 * max_width / natural_width))))
-                font.setStretch(stretch)
         return font
 
     def _font_families(self) -> list[str]:

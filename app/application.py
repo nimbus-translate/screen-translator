@@ -790,6 +790,10 @@ class Application(QObject):
             return
         capture: CaptureInfo = payload["capture"]
         regions: list[TextRegion] = payload["regions"]
+        recognized_count = int(payload.get("recognized_count", len(regions)))
+        translated_count = int(
+            payload.get("translated_count", max(0, len(regions)))
+        )
         failed_count = int(payload.get("failed_count", 0))
         if self.overlay_manager is None:
             return
@@ -803,9 +807,15 @@ class Application(QObject):
         self._sync_overlay_state(overlay_visible)
         self._pipeline_succeeded = True
         if failed_count:
-            self.set_status(f"翻译服务限流：已显示 {len(regions)} 个原文块，请稍后重试或切换翻译服务")
+            self.set_status(
+                f"识别 {recognized_count} 个文本块，已翻译 {translated_count} 个，"
+                f"{failed_count} 个保留原文"
+            )
         else:
-            self.set_status(f"翻译完成：{len(regions)} 个文本块")
+            self.set_status(
+                f"翻译完成：识别 {recognized_count} 个文本块，"
+                f"已翻译 {translated_count} 个"
+            )
         self.floating_status.set_text("翻译完成")
         self._save_history(capture, regions)
 

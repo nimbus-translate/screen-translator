@@ -42,16 +42,42 @@ class MyMemoryTranslator(Translator):
 
     def _translate_batch(self, texts: list[str], source_language: str | None, target_language: str) -> list[str]:
         results: list[str] = []
+        failed_indices: set[int] = set()
         for batch in self._build_batches(texts):
             self._pace()
             translated = self._translate_joined(batch, source_language, target_language)
             if len(translated) == len(batch):
-                results.extend(translated)
+                batch_results = translated
             else:
                 # 行数对不上（MyMemory 偶尔合并/拆分句子）：该批降级为逐条翻译
+                batch_results = []
                 for text in batch:
                     self._pace()
-                    results.append(self._translate_one(text, source_language, target_language))
+                    batch_results.append(
+                        self._translate_one(text, source_language, target_language)
+                    )
+
+            # MyMemory 还会用 200 响应原样返回其中几行。只把这些可疑项
+            # 拆出来逐条重译，避免整页退化成 20~40 次慢请求。
+            for local_index, (source_text, translated_text) in enumerate(
+                zip(batch, batch_results)
+            ):
+                if translated_text.strip() != source_text.strip():
+                    continue
+                try:
+                    self._pace()
+                    batch_results[local_index] = self._translate_one(
+                        source_text, source_language, target_language
+                    )
+                except TranslationError:
+                    failed_indices.add(len(results) + local_index)
+                    continue
+                if batch_results[local_index].strip() == source_text.strip():
+                    failed_indices.add(len(results) + local_index)
+            results.extend(batch_results)
+
+        self.last_failed_indices = failed_indices
+        self.last_failed_count = len(failed_indices)
         return results
 
     @staticmethod

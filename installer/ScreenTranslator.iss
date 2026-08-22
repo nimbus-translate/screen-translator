@@ -3,7 +3,7 @@
 ; tagged release.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.5"
+  #define MyAppVersion "0.2.5-beta"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\\dist"

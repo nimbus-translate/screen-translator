@@ -18,8 +18,23 @@ def test_target_script_and_ui_glyphs_are_not_translated():
     assert not needs_translation(".github/workflows", "zh")
     assert not needs_translation("README.md", "zh")
     assert not needs_translation("e8483e8", "zh")
+    assert not needs_translation("Claude", "zh")
+    assert not needs_translation("stripe", "zh")
+    assert not needs_translation("0 Spotify", "zh")
+    assert not needs_translation("Banner Health", "zh")
+    assert not needs_translation("SWE-Bench Pro", "zh")
+    assert not needs_translation("GDPval-AA", "zh")
+    assert not needs_translation("Legal Agent Benchmark", "zh")
+    assert not needs_translation("CURSOR", "zh")
+    assert needs_translation("CursorBench. It's opened up a class of long-horizon problems", "zh")
+    assert needs_translation("benchmarks. But what excites us most is the direction", "zh")
+    assert not needs_translation("xhigh", "zh")
     assert needs_translation("Settings", "zh")
     assert needs_translation("3 Commits", "zh")
+    assert needs_translation(
+        "模型界面残留 our strong dedication to customer excellence", "zh"
+    )
+    assert not needs_translation("使用 GitHub Actions 自动构建版本", "zh")
 
 
 class _OCR:
@@ -64,6 +79,9 @@ def test_pipeline_only_sends_meaningful_foreign_text(tmp_path):
 
     assert translator.calls == [(["Settings"], "auto", "zh")]
     regions = results[0]["regions"]
+    assert results[0]["recognized_count"] == 3
+    assert results[0]["translation_candidate_count"] == 1
+    assert results[0]["translated_count"] == 1
     assert [(region.text, region.translated_text) for region in regions] == [
         ("设置", "设置"),
         ("Settings", "设置"),

@@ -77,7 +77,7 @@ def test_detect_noisy_background_dark_text():
     image = np.clip(image + rng.normal(0, 6, image.shape), 0, 255).astype(np.uint8)
     image[12:28, 12:40] = (20, 20, 20)
     bg, text, luminance = detect_colors(image, 0, 0, 80, 40)
-    assert text == "#000000"
+    assert text == "#141414"
     assert luminance >= 0.55
     bg_rgb = (int(bg[1:3], 16), int(bg[3:5], 16), int(bg[5:7], 16))
     assert min(bg_rgb) >= 230
@@ -97,7 +97,7 @@ def test_detect_gradient_background():
     image = np.repeat(image, 3, axis=2)
     image[12:28, 12:40] = (20, 20, 20)
     bg, text, luminance = detect_colors(image, 0, 0, 80, 40)
-    assert text == "#000000"
+    assert text == "#141414"
     assert luminance >= 0.55
 
 
@@ -109,7 +109,7 @@ def test_detect_tight_text_block():
     image[4:30, 0:52] = fg
     detected_bg, detected_text, luminance = detect_colors(image, 0, 0, 80, 40)
     assert detected_bg == "#24303D"
-    assert detected_text == "#FFFFFF"
+    assert detected_text == "#D3D3D3"
     assert luminance < 0.55
 
 
@@ -122,7 +122,7 @@ def test_detect_page_with_yellow_icon():
     image[2:10, 70:80] = bgr_from_hex("#F0C83C")
     detected_bg, detected_text, _ = detect_colors(image, 0, 0, 80, 40)
     assert detected_bg == "#24303D"
-    assert detected_text == "#FFFFFF"
+    assert detected_text == "#D3D3D3"
 
 
 def test_dominant_color_light_page():
@@ -166,6 +166,12 @@ def test_sanitize_background_keeps_red_banner():
     red = "#B05C5C"
     assert color_distance(red, "#24303D") > 55
     assert sanitize_background(red, global_bg) == red
+
+
+def test_sanitize_background_keeps_pastel_table_highlight():
+    """浅粉表格列是设计色，不得被页面白色基调吞成白块。"""
+    global_bg = bgr_from_hex("#FFFFFF")
+    assert sanitize_background("#F2DDD6", global_bg) == "#F2DDD6"
 
 
 def test_sanitize_background_keeps_light_card():
@@ -221,10 +227,10 @@ def test_ensure_text_contrast_fixes_black_on_dark():
 
 
 def test_purify_text_color_removes_hue_shift():
-    """Steam 灰白字采样出紫灰/绿灰等低饱和脏色 -> 归一为纯白（深底）或纯黑（浅底）。"""
-    assert purify_text_color("#AC9EB8", "#1B2837") == "#FFFFFF"
-    assert purify_text_color("#ACB2A4", "#1B2837") == "#FFFFFF"
-    assert purify_text_color("#696F7E", "#1B2837") == "#FFFFFF"
+    """低饱和采样色去色相，同时尽量保留原来的灰度层级。"""
+    assert purify_text_color("#AC9EB8", "#1B2837") == "#ABABAB"
+    assert purify_text_color("#ACB2A4", "#1B2837") == "#ABABAB"
+    assert purify_text_color("#696F7E", "#1B2837") == "#727272"
     assert purify_text_color("#ACB2B8", "#F5F5F5") == "#000000"
 
 
@@ -235,9 +241,9 @@ def test_purify_text_color_keeps_saturated():
 
 
 def test_detect_purifies_gray_text_on_dark():
-    """深底浅灰文字即使被采样出色相漂移，最终也归一为纯白。"""
+    """深底浅灰文字去掉色偏后仍保留浅灰，不被粗暴洗成纯白。"""
     image = np.full((40, 80, 3), bgr_from_hex("#1B2837"), dtype=np.uint8)
     image[10:30, 10:60] = bgr_from_hex("#AC9EB8")
     bg, text, luminance = detect_colors(image, 0, 0, 80, 40)
     assert bg == "#1B2837"
-    assert text == "#FFFFFF"
+    assert text == "#ABABAB"

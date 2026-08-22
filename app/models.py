@@ -21,6 +21,9 @@ class TextRegion:
     y: int = 0
     width: int = 0
     height: int = 0
+    # 多行源文本合并后，height 是整个联合框；字号仍应按单行原文高度计算。
+    source_line_height: float = 0.0
+    source_line_count: int = 1
     confidence: float = 1.0
     screen_index: int = 0
     source_luminance: float = 0.5
@@ -50,6 +53,8 @@ class TextRegion:
             "y": self.y,
             "width": self.width,
             "height": self.height,
+            "source_line_height": self.source_line_height,
+            "source_line_count": self.source_line_count,
             "confidence": self.confidence,
             "screen_index": self.screen_index,
         }
@@ -63,6 +68,8 @@ class TextRegion:
             y=int(data.get("y", 0)),
             width=int(data.get("width", 0)),
             height=int(data.get("height", 0)),
+            source_line_height=float(data.get("source_line_height", 0.0)),
+            source_line_count=max(1, int(data.get("source_line_count", 1))),
             confidence=float(data.get("confidence", 1.0)),
             screen_index=int(data.get("screen_index", 0)),
         )

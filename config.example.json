@@ -48,8 +48,11 @@
     "max_retries": 3,
     "retry_delay_seconds": 1.0,
     "request_interval_seconds": 0.0,
-    "google_free_max_workers": 8,
-    "google_free_interval": 0.0,
+    "google_free_max_workers": 4,
+    "google_free_interval": 0.05,
+    "google_free_partial_retries": 0,
+    "google_free_retry_backoff": 0.35,
+    "google_free_fallback_to_mymemory": true,
     "cache_ttl_days": 30,
     "cache_max_entries": 2000,
     "openai": {

@@ -78,7 +78,7 @@ def sanitize_background(
     bg_hex: str,
     global_bg: np.ndarray | None,
     threshold: int = 55,
-    saturation_threshold: int = 40,
+    saturation_threshold: int = 20,
     luminance_gap: float = 0.35,
 ) -> str:
     """块级识别背景色与页面基调交叉验证，只纠正“采样噪声”，不吞独立色块。
@@ -131,7 +131,7 @@ def contrast_ratio(text_hex: str, bg_hex: str) -> float:
 
 
 def purify_text_color(text_hex: str, bg_hex: str, saturation_threshold: int = 45) -> str:
-    """低饱和文字归一到黑白，消除采样色相漂移（灰白字变成紫灰/绿灰）。
+    """低饱和文字去除错误色相，但保留原本的灰度层级。
 
     只有明显带彩色的文字（蓝色链接、黄色标题、红色警示等）才保留原色。
     """
@@ -139,11 +139,17 @@ def purify_text_color(text_hex: str, bg_hex: str, saturation_threshold: int = 45
     saturation = max(r, g, b) - min(r, g, b)
     if saturation >= saturation_threshold:
         return text_hex
+    gray = int(round((r + g + b) / 3.0))
+    neutral = f"#{gray:02X}{gray:02X}{gray:02X}"
+    # 灰色说明文字不该被强行画成纯黑/纯白。仅当保留灰阶会确实不可读时，
+    # 才回退到高对比黑白。
+    if contrast_ratio(neutral, bg_hex) >= 2.5:
+        return neutral
     return text_color_for_luminance(hex_luminance(bg_hex))
 
 
-def ensure_text_contrast(text_hex: str, bg_hex: str, min_ratio: float = 4.5) -> str:
-    """背景被纠正/替换后，若文字与背景 WCAG 对比不足则按背景亮度选黑白，保证可读。"""
+def ensure_text_contrast(text_hex: str, bg_hex: str, min_ratio: float = 2.5) -> str:
+    """仅修正几乎不可读的取色错误；保留原界面的灰色文字层级。"""
     if contrast_ratio(text_hex, bg_hex) >= min_ratio:
         return text_hex
     return text_color_for_luminance(hex_luminance(bg_hex))
@@ -321,7 +327,7 @@ def resize_to_max(image_bgr: np.ndarray, max_side: int = 4096) -> tuple[np.ndarr
 
 def resize_for_ocr(
     image_bgr: np.ndarray,
-    min_side: int = 1600,
+    min_side: int = 2200,
     max_side: int = 4096,
     max_upscale: float = 3.0,
 ) -> tuple[np.ndarray, float]:

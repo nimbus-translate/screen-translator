@@ -6,6 +6,7 @@ from typing import Iterable
 
 from app.models import TextRegion
 from services.ocr.base import OCRLine
+from utils.language_utils import needs_translation
 
 
 def filter_by_confidence(lines: list[OCRLine], min_confidence: float) -> list[OCRLine]:
@@ -106,11 +107,73 @@ def ocr_lines_to_regions(
                 y=offset_y + y,
                 width=w,
                 height=h,
+                source_line_height=float(h),
                 confidence=confidence,
                 screen_index=screen_index,
             )
         )
     return regions
+
+
+def merge_wrapped_labels(
+    regions: list[TextRegion], target_language: str, capture_width: int
+) -> list[TextRegion]:
+    """合并被 OCR 拆开的标签和段落，同时保留原始单行字号参考。
+
+    只处理单列宽度内且左边缘对齐的相邻行，避免把表格不同列乱并。
+    基准名称、文件名等不翻译内容也不会被吸进译文框。
+    """
+    if len(regions) < 2:
+        return regions
+
+    remaining = sorted(regions, key=lambda item: (item.y, item.x))
+    max_label_width = max(180, int(round(max(1, capture_width) * 0.36)))
+    merged: list[TextRegion] = []
+    while remaining:
+        current = remaining.pop(0)
+        source_height = current.source_line_height or float(current.height)
+
+        while remaining:
+            match_index: int | None = None
+            for candidate_index, candidate in enumerate(remaining):
+                candidate_height = candidate.source_line_height or float(candidate.height)
+                gap_tolerance = max(
+                    8, int(round(max(source_height, candidate_height) * 0.8))
+                )
+                gap = candidate.y - current.bottom
+                if gap > gap_tolerance:
+                    break
+                x_tolerance = max(
+                    5, int(round(max(source_height, candidate_height) * 0.35))
+                )
+                if (
+                    current.width <= max_label_width
+                    and candidate.width <= max_label_width
+                    and abs(candidate.x - current.x) <= x_tolerance
+                    and 0 <= gap
+                    and needs_translation(current.text, target_language)
+                    and needs_translation(candidate.text, target_language)
+                ):
+                    match_index = candidate_index
+                    break
+            if match_index is None:
+                break
+
+            candidate = remaining.pop(match_index)
+            candidate_height = candidate.source_line_height or float(candidate.height)
+            right = max(current.right, candidate.right)
+            bottom = max(current.bottom, candidate.bottom)
+            current.text = f"{current.text.rstrip()} {candidate.text.lstrip()}"
+            current.width = right - current.x
+            current.height = bottom - current.y
+            current.source_line_height = max(source_height, candidate_height)
+            current.source_line_count += max(1, candidate.source_line_count)
+            current.confidence = min(current.confidence, candidate.confidence)
+            source_height = current.source_line_height
+
+        merged.append(current)
+
+    return sorted(merged, key=lambda item: (item.y, item.x))
 
 
 def clamp_region(region: TextRegion, bounds: tuple[int, int, int, int]) -> TextRegion:

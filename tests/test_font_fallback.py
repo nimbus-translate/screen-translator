@@ -2,7 +2,7 @@
 
 import pytest
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 
@@ -60,10 +60,11 @@ def _fit(window, text: str, width: int, height: int):
     return window._fit_font(text, QRectF(0, 0, width, height), 4)
 
 
-def test_fit_font_keeps_preferred_size_for_roomy_rect(app):
+def test_fit_font_matches_large_source_height(app):
     window = _build_window(app, "")
     font = _fit(window, "你好世界", 300, 60)
-    assert font.pointSize() == int(window._config.get("overlay.font_size", 18))
+    assert font.pointSize() > int(window._config.get("overlay.font_size", 18))
+    assert QFontMetrics(font).height() <= 61
 
 
 def test_fit_font_shrinks_for_small_rect(app):
@@ -80,12 +81,27 @@ def test_fit_font_never_drops_below_readable_minimum(app):
     assert font.pointSize() >= 8
 
 
-def test_fit_font_preserves_height_and_condenses_long_text(app):
+def test_fit_font_preserves_natural_glyph_aspect_ratio(app):
     window = _build_window(app, "")
     short = _fit(window, "翻译完成", 90, 40)
     long = _fit(window, "这是一段比较长的翻译文本需要自动换行显示", 90, 40)
-    assert long.pointSize() == short.pointSize()
-    assert long.stretch() < short.stretch()
+    assert long.pointSize() <= short.pointSize()
+    assert long.stretch() == short.stretch()
+
+
+def test_multiline_font_wraps_without_condensing(app):
+    from PySide6.QtCore import QRectF
+
+    window = _build_window(app, "")
+    font = window._fit_font(
+        "这是一整段需要在原段落区域内自然换行的中文译文",
+        QRectF(0, 0, 240, 100),
+        4,
+        size_height=24,
+        multiline=True,
+    )
+    assert font.stretch() == 0
+    assert font.pointSize() >= 8
 
 
 def test_fit_font_scales_with_block_height(app):
@@ -96,6 +112,14 @@ def test_fit_font_scales_with_block_height(app):
     assert big.pointSize() > small.pointSize()
     # 大按钮字号应明显大于配置下限（8pt），避免“大框小字”
     assert big.pointSize() >= 12
+
+
+def test_tiny_ocr_box_can_drop_below_configured_minimum(app):
+    """9px 小字不能再被 8pt 字体硬塞到框外。"""
+    window = _build_window(app, "")
+    font = _fit(window, "工具", 50, 9)
+    assert 5 <= font.pointSize() <= 6
+    assert QFontMetrics(font).height() <= 10
 
 
 def test_size_groups_unify_same_level_font(app):
@@ -118,6 +142,24 @@ def test_size_groups_unify_same_level_font(app):
     assert fonts[0] == fonts[1] == fonts[2]
     assert fonts[3] == fonts[4]
     assert fonts[0] != fonts[3]
+
+
+def test_same_visual_row_uses_one_size_but_dark_button_stays_separate(app):
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QColor
+    from ui.translation_overlay import Block
+
+    window = _build_window(app, "")
+    blocks = [
+        Block(QRectF(10, 20, 80, 17), "研究", QColor("#111111"), "#FAF9F5", 17),
+        Block(QRectF(110, 20, 80, 23), "政策", QColor("#111111"), "#FAF9F5", 23),
+        Block(QRectF(210, 21, 80, 16), "新闻", QColor("#111111"), "#FAF9F5", 16),
+        Block(QRectF(310, 20, 100, 23), "试用", QColor("#FFFFFF"), "#111111", 23),
+    ]
+    window.set_blocks(blocks)
+
+    assert window._size_groups[0] == window._size_groups[1] == window._size_groups[2] == 17
+    assert window._size_groups[3] == 23
 
 
 def test_auto_background_fully_erases_source_and_clips_text(app):

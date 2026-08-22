@@ -7,6 +7,7 @@ from utils.layout_utils import (
     filter_by_confidence,
     group_into_rows,
     merge_lines,
+    merge_wrapped_labels,
     ocr_lines_to_regions,
 )
 
@@ -67,6 +68,37 @@ def test_ocr_lines_to_regions_offsets():
     assert regions[0].x == 1930
     assert regions[0].y == 120
     assert regions[0].width == 30
+    assert regions[0].source_line_height == 15
+
+
+def test_merge_wrapped_labels_keeps_single_line_font_reference():
+    regions = [
+        TextRegion(text="Knowledge work", x=20, y=20, width=120, height=18, source_line_height=18),
+        TextRegion(text="vision", x=21, y=42, width=55, height=17, source_line_height=17),
+        TextRegion(text="GDP.pdf", x=20, y=62, width=60, height=14, source_line_height=14),
+    ]
+
+    merged = merge_wrapped_labels(regions, "zh", capture_width=1200)
+
+    assert [region.text for region in merged] == ["Knowledge work vision", "GDP.pdf"]
+    assert merged[0].height == 39
+    assert merged[0].source_line_height == 18
+    assert merged[0].source_line_count == 2
+
+
+def test_merge_wrapped_paragraph_lines_in_a_card_column():
+    regions = [
+        TextRegion(text="This is the first line of a customer quote", x=500, y=100, width=520, height=24),
+        TextRegion(text="and this is its second wrapped line", x=501, y=138, width=470, height=25),
+        TextRegion(text="GitHub", x=1180, y=100, width=100, height=25),
+    ]
+
+    merged = merge_wrapped_labels(regions, "zh", capture_width=2250)
+
+    assert merged[0].text == "This is the first line of a customer quote and this is its second wrapped line"
+    assert merged[0].source_line_count == 2
+    assert merged[0].height == 63
+    assert merged[1].text == "GitHub"
 
 
 def test_clamp_region_stays_inside_bounds():

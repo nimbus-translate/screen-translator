@@ -7,7 +7,7 @@ import re
 import sys
 
 
-_SOURCE_VERSION = "0.2.5"
+_SOURCE_VERSION = "0.2.5-beta"
 
 
 def _runtime_version() -> str:
@@ -26,4 +26,4 @@ def _runtime_version() -> str:
 
 __version__ = _runtime_version()
 RELEASE_REPOSITORY = "nimbus-translate/screen-translator"
-RELEASE_CHANNEL = "stable"
+RELEASE_CHANNEL = "beta"

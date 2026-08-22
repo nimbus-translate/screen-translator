@@ -2,10 +2,10 @@
 
 特性：
 - 无需 API Key、无需 Cookie / tk 令牌，匿名可用；
-- 每个文本块独立请求，使用线程池并发（默认 8），25 个块约 1.5-3 秒；
+- 每个文本块独立请求，以低并发发送并对限流条目降速重试；
 - 不做多行合并：gtx 会按语义重新断句（例如 "A. B." 会被拆成两句），
   与 OCR 文本框对不上，逐条请求才能保证行级对齐；
-- 429 快速失败并标记限流，让基类跳过重试直接保留原文。
+- 429 不写入缓存，部分失败会先串行退避重试，再由 MyMemory 兜底。
 """
 
 from __future__ import annotations
@@ -29,9 +29,22 @@ class GoogleFreeTranslator(Translator):
         super().__init__(config_section, cache, api_key)
         cfg = config_section or {}
         self.base_url = "https://translate.googleapis.com/translate_a/single"
-        self.max_workers = int(cfg.get("google_free_max_workers", 8) or 8)
-        self.interval = float(cfg.get("google_free_interval", 0.0) or 0.0)
-        self.timeout = float(cfg.get("timeout_seconds", 30) or 30)
+        configured_workers = int(cfg.get("google_free_max_workers", 4) or 4)
+        # 初轮用中等并发抢速度；失败尾巴不再在 Google 上死磕，而是快速
+        # 交给 MyMemory 批量兜底。这样大表格不会被一个坏块拖几十秒。
+        self.max_workers = max(1, min(4, configured_workers))
+        configured_interval = float(cfg.get("google_free_interval", 0.05) or 0.0)
+        self.interval = max(0.05, configured_interval)
+        self.partial_retries = max(
+            0, min(1, int(cfg.get("google_free_partial_retries", 0) or 0))
+        )
+        self.retry_backoff = max(
+            0.2, float(cfg.get("google_free_retry_backoff", 0.35) or 0.35)
+        )
+        self.fallback_to_mymemory = bool(
+            cfg.get("google_free_fallback_to_mymemory", True)
+        )
+        self.timeout = min(6.0, float(cfg.get("timeout_seconds", 30) or 30))
         self._session = requests.Session()
         adapter = HTTPAdapter(pool_connections=self.max_workers, pool_maxsize=self.max_workers)
         self._session.mount("https://", adapter)
@@ -50,7 +63,7 @@ class GoogleFreeTranslator(Translator):
             raise TranslationError(f"Google 免费翻译不支持目标语言：{target_language}")
 
         results: list[str] = [""] * len(texts)
-        failures = 0
+        failed_indices: set[int] = set()
         saw_rate_limit = False
         last_error: TranslationError | None = None
 
@@ -64,17 +77,82 @@ class GoogleFreeTranslator(Translator):
                 try:
                     results[idx] = future.result()
                 except TranslationError as exc:
-                    failures += 1
+                    failed_indices.add(idx)
                     saw_rate_limit = saw_rate_limit or bool(exc.rate_limited)
                     last_error = exc
                     results[idx] = texts[idx]
 
-        self.last_failed_count = failures
-        if failures == len(texts):
+        # 部分成功时不能把失败项直接交给基类缓存。逐轮降低到串行请求，
+        # 给 429 一个退避窗口，同时保持结果索引不乱。
+        for attempt in range(self.partial_retries):
+            if not failed_indices:
+                break
+            time.sleep(self.retry_backoff * (2**attempt))
+            retrying = sorted(failed_indices)
+            failed_indices = set()
+            for idx in retrying:
+                try:
+                    results[idx] = self._translate_one(texts[idx], source, target)
+                except TranslationError as exc:
+                    failed_indices.add(idx)
+                    saw_rate_limit = saw_rate_limit or bool(exc.rate_limited)
+                    last_error = exc
+                    results[idx] = texts[idx]
+
+        if failed_indices and self.fallback_to_mymemory:
+            recovered = self._recover_with_mymemory(
+                texts, failed_indices, source_language, target_language
+            )
+            for idx, translated_text in recovered.items():
+                results[idx] = translated_text
+                failed_indices.discard(idx)
+
+        self.last_failed_indices = failed_indices
+        self.last_failed_count = len(failed_indices)
+        if len(failed_indices) == len(texts):
             raise TranslationError(
                 str(last_error or "Google 免费翻译失败"), rate_limited=saw_rate_limit
             )
         return results
+
+    def _recover_with_mymemory(
+        self,
+        texts: list[str],
+        failed_indices: set[int],
+        source_language: str | None,
+        target_language: str,
+    ) -> dict[int, str]:
+        """Use the other anonymous provider only for Google's failed tail."""
+
+        from services.translation.mymemory_translator import MyMemoryTranslator
+
+        ordered_indices = sorted(failed_indices)
+        fallback_texts = [texts[idx] for idx in ordered_indices]
+        fallback_config = dict(self.config)
+        fallback_config["max_retries"] = 0
+        fallback_config["timeout_seconds"] = min(
+            6.0, float(fallback_config.get("timeout_seconds", 30) or 30)
+        )
+        fallback_config["mymemory_min_interval"] = 0.15
+        fallback = MyMemoryTranslator(fallback_config, cache=None)
+        try:
+            translated = fallback.translate(
+                fallback_texts, source_language, target_language
+            )
+        except TranslationError:
+            return {}
+
+        recovered: dict[int, str] = {}
+        fallback_failed = set(fallback.last_failed_indices)
+        for local_index, (source_text, translated_text) in enumerate(
+            zip(fallback_texts, translated)
+        ):
+            if (
+                local_index not in fallback_failed
+                and translated_text.strip() != source_text.strip()
+            ):
+                recovered[ordered_indices[local_index]] = translated_text
+        return recovered
 
     def _translate_one(self, text: str, source: str, target: str) -> str:
         text = (text or "").strip()

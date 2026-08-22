@@ -62,8 +62,11 @@ DEFAULTS: dict[str, Any] = {
         "max_retries": 3,
         "retry_delay_seconds": 1.0,
         "request_interval_seconds": 0.0,
-        "google_free_max_workers": 8,
-        "google_free_interval": 0.0,
+        "google_free_max_workers": 4,
+        "google_free_interval": 0.05,
+        "google_free_partial_retries": 0,
+        "google_free_retry_backoff": 0.35,
+        "google_free_fallback_to_mymemory": True,
         "cache_ttl_days": 30,
         "cache_max_entries": 2000,
         "openai": {
@@ -148,6 +151,24 @@ def _normalize_appearance(data: dict[str, Any]) -> None:
         appearance["reduce_motion"] = defaults["reduce_motion"]
 
 
+def _normalize_translation(data: dict[str, Any]) -> None:
+    """Clamp legacy anonymous-Google tuning that made large captures slower."""
+    translation = data.setdefault("translation", {})
+    try:
+        workers = int(translation.get("google_free_max_workers", 4) or 4)
+    except (TypeError, ValueError):
+        workers = 4
+    try:
+        interval = float(translation.get("google_free_interval", 0.05) or 0.0)
+    except (TypeError, ValueError):
+        interval = 0.05
+    translation["google_free_max_workers"] = max(1, min(4, workers))
+    translation["google_free_interval"] = max(0.05, interval)
+    # 旧版逐条重试会把 20 个失败尾项串行拖几十秒；失败尾巴现在直接批量兜底。
+    translation["google_free_partial_retries"] = 0
+    translation.setdefault("google_free_fallback_to_mymemory", True)
+
+
 class AppConfig:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path else self._default_path()
@@ -170,6 +191,7 @@ class AppConfig:
             if isinstance(loaded, dict):
                 _deep_merge(self.data, loaded)
                 _normalize_appearance(self.data)
+                _normalize_translation(self.data)
                 # This legacy field is retained for compatibility; capture
                 # feedback now reads appearance.accent.  Normalize the red
                 # debug value so old files no longer carry misleading state.

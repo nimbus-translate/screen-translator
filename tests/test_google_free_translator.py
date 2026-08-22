@@ -99,7 +99,10 @@ def test_translate_preserves_order_with_concurrency(monkeypatch):
 
 
 def test_partial_failure_keeps_original(monkeypatch):
-    translator = GoogleFreeTranslator({}, None)
+    translator = GoogleFreeTranslator(
+        {"google_free_fallback_to_mymemory": False}, None
+    )
+    monkeypatch.setattr("services.translation.google_free_translator.time.sleep", lambda _delay: None)
 
     def fake_get(url, params, timeout):
         if params["q"] == "bad":
@@ -110,10 +113,40 @@ def test_partial_failure_keeps_original(monkeypatch):
     result = translator.translate(["good", "bad", "ok"], "auto", "zh")
     assert result == ["译:good", "bad", "译:ok"]
     assert translator.last_failed_count == 1
+    assert translator.last_failed_indices == {1}
+
+
+def test_partial_rate_limit_retries_serially_and_recovers(monkeypatch):
+    translator = GoogleFreeTranslator(
+        {
+            "google_free_partial_retries": 1,
+            "google_free_fallback_to_mymemory": False,
+        },
+        None,
+    )
+    attempts = {}
+    monkeypatch.setattr("services.translation.google_free_translator.time.sleep", lambda _delay: None)
+
+    def fake_get(url, params, timeout):
+        text = params["q"]
+        attempts[text] = attempts.get(text, 0) + 1
+        if text == "limited" and attempts[text] == 1:
+            return FakeResponse({}, status_code=429)
+        return FakeResponse(_gtx_payload("译:" + text))
+
+    monkeypatch.setattr(translator._session, "get", fake_get)
+    result = translator.translate(["good", "limited", "ok"], "auto", "zh")
+
+    assert result == ["译:good", "译:limited", "译:ok"]
+    assert translator.last_failed_count == 0
+    assert translator.last_failed_indices == set()
 
 
 def test_all_429_marks_rate_limited(monkeypatch):
-    translator = GoogleFreeTranslator({}, None)
+    translator = GoogleFreeTranslator(
+        {"google_free_fallback_to_mymemory": False}, None
+    )
+    monkeypatch.setattr("services.translation.google_free_translator.time.sleep", lambda _delay: None)
 
     def fake_get(url, params, timeout):
         return FakeResponse({}, status_code=429)
@@ -125,7 +158,10 @@ def test_all_429_marks_rate_limited(monkeypatch):
 
 
 def test_all_failure_raises_with_429_flag(monkeypatch):
-    translator = GoogleFreeTranslator({}, None)
+    translator = GoogleFreeTranslator(
+        {"google_free_fallback_to_mymemory": False}, None
+    )
+    monkeypatch.setattr("services.translation.google_free_translator.time.sleep", lambda _delay: None)
 
     def fake_get(url, params, timeout):
         return FakeResponse({}, status_code=429)
@@ -134,6 +170,29 @@ def test_all_failure_raises_with_429_flag(monkeypatch):
     with pytest.raises(TranslationError) as exc_info:
         translator._translate_batch(["a"], "auto", "zh")
     assert exc_info.value.rate_limited is True
+
+
+def test_failed_tail_is_recovered_by_mymemory(monkeypatch):
+    translator = GoogleFreeTranslator({"google_free_partial_retries": 0}, None)
+    monkeypatch.setattr(
+        translator,
+        "_recover_with_mymemory",
+        lambda texts, failed, source, target: {1: "客户至上"},
+    )
+
+    def fake_get(url, params, timeout):
+        if params["q"] == "customer dedication":
+            return FakeResponse({}, status_code=429)
+        return FakeResponse(_gtx_payload("译:" + params["q"]))
+
+    monkeypatch.setattr(translator._session, "get", fake_get)
+    result = translator.translate(
+        ["first line", "customer dedication", "last line"], "auto", "zh"
+    )
+
+    assert result == ["译:first line", "客户至上", "译:last line"]
+    assert translator.last_failed_count == 0
+    assert translator.last_failed_indices == set()
 
 
 def test_bad_response_format_raises(monkeypatch):

@@ -16,12 +16,12 @@ def test_small_image_is_upscaled():
     resized, scale = resize_for_ocr(img)
     assert scale > 1.0
     assert resized.shape[1] > 400
-    # 长边放大到接近 min_side（1600），受 max_upscale=3 限制
-    assert max(resized.shape[:2]) <= 1600
+    # 长边放大到接近 min_side（2200），受 max_upscale=3 限制
+    assert max(resized.shape[:2]) <= 2200
 
 
 def test_medium_image_unchanged():
-    img = _img(2000, 1200)
+    img = _img(2600, 1200)
     resized, scale = resize_for_ocr(img)
     assert scale == 1.0
     assert resized.shape == img.shape

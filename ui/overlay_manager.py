@@ -59,6 +59,8 @@ class OverlayManager(QObject):
                         display_text,
                         QColor(region.text_color),
                         region.background_color,
+                        (region.source_line_height or region.height) / monitor.dpr,
+                        max(1, region.source_line_count),
                     )
                 )
             if not blocks:

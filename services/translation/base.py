@@ -45,6 +45,7 @@ class Translator(ABC):
         self._lock = Lock()
         self._last_request_time = 0.0
         self.last_failed_count = 0
+        self.last_failed_indices: set[int] = set()
 
     # ------------------------------------------------------------- 子类实现
     @abstractmethod
@@ -60,6 +61,7 @@ class Translator(ABC):
     ) -> list[str]:
         """带缓存、限速、重试的批量翻译。"""
         self.last_failed_count = 0
+        self.last_failed_indices = set()
         if not texts:
             return []
 
@@ -69,7 +71,14 @@ class Translator(ABC):
 
         for idx, text in enumerate(texts):
             cached = self._cache_get(source_language, target_language, text)
-            if cached is not None:
+            # 旧版本会把限流后原样返回的英文写进缓存，之后每次都把
+            # “原文=译文”当成功结果。跨语言翻译遇到这种值必须重试。
+            poisoned = (
+                cached is not None
+                and cached.strip() == text.strip()
+                and (source_language or "auto") != target_language
+            )
+            if cached is not None and not poisoned:
                 results[idx] = cached
             else:
                 pending_indices.append(idx)
@@ -77,9 +86,31 @@ class Translator(ABC):
 
         if pending_texts:
             translated = self._translate_with_retry(pending_texts, source_language, target_language)
-            for idx, text, translated_text in zip(pending_indices, pending_texts, translated):
+            failed_indices = set(self.last_failed_indices)
+            # 有些免费服务会用 200 响应把原文原样塞回来。HTTP 成功不等于
+            # 翻译成功：这类条目必须计为失败，更不能写进持久缓存。
+            failed_indices.update(
+                pending_idx
+                for pending_idx, (text, translated_text) in enumerate(
+                    zip(pending_texts, translated)
+                )
+                if translated_text.strip() == text.strip()
+                and (source_language or "auto") != target_language
+            )
+            self.last_failed_indices = failed_indices
+            self.last_failed_count = len(failed_indices)
+            for pending_idx, (idx, text, translated_text) in enumerate(
+                zip(pending_indices, pending_texts, translated)
+            ):
                 results[idx] = translated_text
-                self._cache_set(source_language, target_language, text, translated_text)
+                # 失败回退结果和可疑同文结果绝不能污染缓存。
+                if (
+                    pending_idx not in failed_indices
+                    and translated_text.strip() != text.strip()
+                ):
+                    self._cache_set(
+                        source_language, target_language, text, translated_text
+                    )
 
         return [results[i] for i in range(len(texts))]
 
@@ -132,12 +163,14 @@ class Translator(ABC):
             or "rate limit" in error_text.lower()
         ):
             self.last_failed_count = len(texts)
+            self.last_failed_indices = set(range(len(texts)))
             log.warning("翻译服务限流，跳过逐条重试并保留原文：%d 条", len(texts))
             return list(texts)
 
         # 批量全挂：逐条重试，失败条目保留原文，避免整屏空白
         out: list[str] = []
-        for text in texts:
+        failed_indices: set[int] = set()
+        for index, text in enumerate(texts):
             ok = False
             for attempt in range(min(max_retries, 2) + 1):
                 try:
@@ -150,6 +183,7 @@ class Translator(ABC):
                         last_error = TranslationError("翻译服务发生未预期错误")
             if not ok:
                 self.last_failed_count += 1
+                failed_indices.add(index)
                 out.append(text)
                 # Never place captured screen text in logs: diagnostic bundles
                 # intentionally include logs and must not become translation history.
@@ -157,6 +191,7 @@ class Translator(ABC):
 
         if self.last_failed_count == len(texts):
             raise TranslationError(str(last_error or "翻译失败"))
+        self.last_failed_indices = failed_indices
         return out
 
     def _rate_limit(self) -> None:
