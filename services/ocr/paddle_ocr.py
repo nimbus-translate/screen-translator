@@ -3,15 +3,30 @@
 from __future__ import annotations
 
 import threading
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from app.logger import get_logger
+from app.logger import app_data_dir, get_logger
 from services.ocr.base import OCRLine, OCREngine, register_engine
+from services.ocr.component_manager import DEFAULT_MANIFEST_URL, PaddleComponentManager
 from utils.language_utils import to_paddle_lang
 
 log = get_logger("ocr.paddle")
+
+
+def component_manager(app_config: Any = None) -> PaddleComponentManager:
+    manifest_url = DEFAULT_MANIFEST_URL
+    if app_config is not None:
+        manifest_url = str(
+            app_config.get("ocr.paddle.component_manifest_url", DEFAULT_MANIFEST_URL)
+            or DEFAULT_MANIFEST_URL
+        )
+    return PaddleComponentManager(
+        app_data_dir() / "components" / "paddleocr", manifest_url=manifest_url
+    )
 
 
 def _poly_to_box(poly) -> tuple[int, int, int, int]:
@@ -76,16 +91,34 @@ class PaddleOCREngine(OCREngine):
         self._lang: str = ""
         self._lock = threading.Lock()
         self._fail_reason: str | None = None
+        self._component = component_manager(app_config)
+        self._component_mode = not self._local_available() and self._component.is_installed()
 
-    @classmethod
-    def available(cls) -> bool:
+    @property
+    def uses_external_component(self) -> bool:
+        return self._component_mode
+
+    @staticmethod
+    def _local_available() -> bool:
         try:
             import paddleocr  # noqa: F401
             import paddle  # noqa: F401
 
             return True
         except Exception:
-            log.exception("PaddleOCR 依赖检查失败")
+            return False
+
+    @classmethod
+    def local_available(cls) -> bool:
+        return cls._local_available()
+
+    @classmethod
+    def available(cls) -> bool:
+        if cls._local_available():
+            return True
+        try:
+            return component_manager().is_installed()
+        except Exception:
             return False
 
     def _build_engine(self, lang: str) -> None:
@@ -121,7 +154,10 @@ class PaddleOCREngine(OCREngine):
         self._lang = lang
 
     def warmup(self) -> None:
-        lang = str(self.config.get("lang", "ch"))
+        lang = str(self.config.get("lang", "auto"))
+        if self._component_mode:
+            self._component.warmup()
+            return
         with self._lock:
             if self._engine is None:
                 self._build_engine(lang)
@@ -132,7 +168,9 @@ class PaddleOCREngine(OCREngine):
                 log.warning("PaddleOCR 预热失败（首次使用时会重试）：%s", exc)
 
     def recognize(self, image_bgr, lang: str | None = None) -> list[OCRLine]:
-        lang = lang or str(self.config.get("lang", "ch"))
+        lang = lang or str(self.config.get("lang", "auto"))
+        if self._component_mode:
+            return self._recognize_component(image_bgr, lang)
         with self._lock:
             if self._engine is None or lang != self._lang:
                 try:
@@ -163,6 +201,47 @@ class PaddleOCREngine(OCREngine):
                 return lines
             except Exception as exc:
                 raise RuntimeError(f"PaddleOCR 识别失败：{exc}") from exc
+
+    def _recognize_component(self, image_bgr, lang: str) -> list[OCRLine]:
+        from PIL import Image
+
+        handle, temporary_name = tempfile.mkstemp(
+            prefix="screen-translator-paddle-", suffix=".png"
+        )
+        try:
+            import os
+
+            os.close(handle)
+            path = Path(temporary_name)
+            rgb = np.ascontiguousarray(image_bgr[:, :, ::-1])
+            Image.fromarray(rgb, mode="RGB").save(path, format="PNG")
+            payload = self._component.run_ocr(
+                path, lang=to_paddle_lang(lang), timeout_seconds=120.0
+            )
+            lines: list[OCRLine] = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                box = item.get("box") or (0, 0, 0, 0)
+                if not isinstance(box, (list, tuple)) or len(box) != 4:
+                    box = (0, 0, 0, 0)
+                text = str(item.get("text", "")).strip()
+                if not text:
+                    continue
+                lines.append(
+                    OCRLine(
+                        text=text,
+                        box=tuple(int(value) for value in box),
+                        confidence=float(item.get("confidence", 1.0)),
+                        angle=float(item.get("angle", 0.0)),
+                        block_id=int(item.get("block_id", 0)),
+                    )
+                )
+            return lines
+        except Exception as exc:
+            raise RuntimeError(f"PaddleOCR 可选组件识别失败：{exc}") from exc
+        finally:
+            Path(temporary_name).unlink(missing_ok=True)
 
 
 register_engine(PaddleOCREngine)

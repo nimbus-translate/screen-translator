@@ -10,7 +10,10 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _KEY_VALUE_RE = re.compile(
-    r"(?i)((?:api[_-]?key|apikey|secret|token|authorization|password)\s*[:=]\s*)(['\"]?)([^'\",\s]{6,})"
+    r"(?i)("
+    r"(?:['\"]?(?:api[_-]?key|apikey|secret|[a-z0-9_-]*token|authorization|password)['\"]?"
+    r"|[?&](?:key|api[_-]?key|[a-z0-9_-]*token))"
+    r"\s*[:=]\s*)(['\"]?)([^'\",\s}&]{4,})"
 )
 _SK_RE = re.compile(r"(?i)\bsk-[a-z0-9_\-]{16,}")
 _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[a-z0-9._\-]{6,}")

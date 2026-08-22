@@ -1,0 +1,8 @@
+# Optional PaddleOCR component / full developer runtime.
+opencv-contrib-python>=4.8
+paddleocr>=3.0
+# Freeze the complete OCR extra set; PaddleOCR itself requests only ocr-core,
+# while PaddleX discovers several OCR paths dynamically at runtime.
+paddlex[ocr]>=3.7,<3.8
+# PaddlePaddle 3.3.x currently regresses Windows CPU inference.
+paddlepaddle>=3.2.2,<3.3.0

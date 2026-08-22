@@ -101,7 +101,7 @@ class OpenAITranslator(Translator):
                 timeout=float(self.config.get("timeout_seconds", 30)),
             )
         except requests.RequestException as exc:
-            raise TranslationError(f"OpenAI 请求失败（超时或网络错误）：{exc}") from exc
+            raise TranslationError("OpenAI 请求失败（超时或网络错误）") from exc
 
         response.encoding = "utf-8"
         if response.status_code == 401:
@@ -109,7 +109,7 @@ class OpenAITranslator(Translator):
         if response.status_code == 429:
             raise TranslationError("OpenAI 请求频率或额度受限（429）")
         if response.status_code != 200:
-            raise TranslationError(f"OpenAI 返回错误 {response.status_code}：{response.text[:200]}")
+            raise TranslationError(f"OpenAI 返回错误 {response.status_code}")
 
         try:
             content = response.json()["choices"][0]["message"]["content"]

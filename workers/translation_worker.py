@@ -51,7 +51,7 @@ class PipelineTask(QThread):
             # 小图先放大再 OCR：游戏截图/弹窗内的小字识别率提升数倍
             image, scale = resize_for_ocr(self.capture.image)
             lines = self.ocr_engine.recognize(
-                image, lang=str(self.config.get("ocr.lang", "ch"))
+                image, lang=str(self.config.get("ocr.lang", "auto"))
             )
             if self._stop:
                 return

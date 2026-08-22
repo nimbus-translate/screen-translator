@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -16,8 +17,9 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 
 from app.config import AppConfig
 from app.hotkeys import HotkeyError, HotkeyManager
-from app.logger import get_logger
+from app.logger import app_data_dir, get_logger
 from app.models import CaptureInfo, TextRegion
+from app.version import __version__
 
 # 确保各 OCR 引擎 / 翻译适配器已注册（顺序影响 UI 下拉框默认项）
 import services.ocr.paddle_ocr  # noqa: F401
@@ -30,8 +32,14 @@ import services.translation.openai_translator  # noqa: F401
 import services.translation.deepl_translator  # noqa: F401
 import services.translation.google_translator  # noqa: F401
 
-from services.ocr.base import create_ocr_engine, list_ocr_engines
+from services.ocr.base import OCRUnavailableError, create_ocr_engine, list_ocr_engines
+from services.authenticode import (
+    AuthenticodeVerificationError,
+    runtime_signature_reference,
+    verify_authenticode,
+)
 from services.screenshot_service import ScreenshotService
+from services.update_service import sha256_file
 from services.translation.base import Translator
 from services.translation.cache import TranslationCache
 from services.translation.factory import create_translator, list_translators
@@ -53,6 +61,8 @@ from ui.selection_overlay import SelectionOverlay
 from ui.settings_dialog import SettingsDialog
 from ui.style import apply_style
 from ui.tray_icon import TrayIcon, build_icon
+from ui.ocr_component_tasks import PaddleComponentInstallTask
+from ui.update_tasks import UpdateCheckTask, UpdateDownloadTask
 from ui.window_capture_highlight import WindowCaptureHighlight
 from utils import dpi_utils
 from utils.language_utils import LANGUAGES, LANGUAGE_CODES
@@ -85,6 +95,7 @@ class Application(QObject):
         self.hotkey_manager = HotkeyManager(self)
         self.translator: Translator | None = None
         self.ocr_engine = None
+        self._active_ocr_engine_name = "none"
         self.cache: TranslationCache | None = None
 
         self.window: MainWindow | None = None
@@ -109,6 +120,9 @@ class Application(QObject):
         self._pipeline_succeeded = False
         self._pipeline_error = ""
         self._shutting_down = False
+        self._shutdown_finalized = False
+        self._shutdown_aux_tasks: list[QObject] = []
+        self._update_check_task: UpdateCheckTask | None = None
 
         self._capture_timer = QTimer(self)
         self._capture_timer.setSingleShot(True)
@@ -139,9 +153,7 @@ class Application(QObject):
                 ttl_days=self.config.get("translation.cache_ttl_days", 30),
                 max_entries=self.config.get("translation.cache_max_entries", 2000),
             )
-            self.ocr_engine = create_ocr_engine(
-                self.config.get("ocr.engine", "paddle"), self.config.section("ocr"), self.config
-            )
+            self.ocr_engine = self._create_configured_ocr_engine()
             resolved_service = self._resolve_translator_service()
             if resolved_service != self.config.get("translation.service", "mock"):
                 self.config.set("translation.service", resolved_service)
@@ -169,6 +181,8 @@ class Application(QObject):
             self._apply_hotkeys()
             self._apply_autostart()
             self._warmup()
+            if self.config.get("updates.auto_check", True):
+                QTimer.singleShot(6000, self._check_for_updates)
         except Exception as exc:
             log.exception("应用启动失败")
             QMessageBox.critical(None, "启动失败", f"{exc}")
@@ -180,6 +194,9 @@ class Application(QObject):
         self._foreground_tracker.stop()
         self._capture_timer.stop()
         self._selection_timer.stop()
+        if self._settings_page is not None:
+            self._settings_page.cancel_background_tasks()
+        self._cancel_auxiliary_tasks_for_shutdown()
         self._dispose_selection()
         self._dispose_window_highlight()
         self.floating_status.hide_immediate()
@@ -193,13 +210,62 @@ class Application(QObject):
         if self.tray is not None:
             self.tray.hide()
         if self.worker is not None and self.worker.isRunning():
+            self.worker.finished.connect(
+                self._maybe_finalize_shutdown, Qt.ConnectionType.UniqueConnection
+            )
             self.worker.cancel()
             self.set_status("正在安全结束当前任务…")
-            self.worker.finished.connect(self._finalize_shutdown, Qt.ConnectionType.UniqueConnection)
+        self._maybe_finalize_shutdown()
+
+    def _cancel_auxiliary_tasks_for_shutdown(self) -> None:
+        """Cancel Qt background jobs and keep the event loop alive for teardown."""
+        task_types = (UpdateCheckTask, UpdateDownloadTask, PaddleComponentInstallTask)
+        tasks: list[QObject] = []
+        for task_type in task_types:
+            tasks.extend(self.qt_app.findChildren(task_type))
+        if self._update_check_task is not None and all(
+            task is not self._update_check_task for task in tasks
+        ):
+            tasks.append(self._update_check_task)
+
+        self._shutdown_aux_tasks = []
+        for task in tasks:
+            try:
+                if not task.isRunning():
+                    continue
+                self._shutdown_aux_tasks.append(task)
+                task.finished.connect(
+                    lambda current=task: self._auxiliary_shutdown_task_finished(current)
+                )
+                task.cancel()
+                if not task.isRunning():
+                    self._auxiliary_shutdown_task_finished(task)
+            except RuntimeError:
+                # The QObject may already have completed and entered deferred
+                # deletion between discovery and cancellation.
+                continue
+        if self._shutdown_aux_tasks:
+            self.set_status("正在安全结束下载与更新任务…")
+
+    def _auxiliary_shutdown_task_finished(self, task: QObject) -> None:
+        self._shutdown_aux_tasks = [
+            current for current in self._shutdown_aux_tasks if current is not task
+        ]
+        QTimer.singleShot(0, self._maybe_finalize_shutdown)
+
+    def _maybe_finalize_shutdown(self) -> None:
+        if not self._shutting_down or self._shutdown_finalized:
+            return
+        if self._shutdown_aux_tasks:
+            return
+        if self.worker is not None and self.worker.isRunning():
             return
         self._finalize_shutdown()
 
     def _finalize_shutdown(self) -> None:
+        if self._shutdown_finalized:
+            return
+        self._shutdown_finalized = True
         worker = self.worker
         self.worker = None
         if worker is not None:
@@ -211,6 +277,11 @@ class Application(QObject):
         if os.environ.get("SCREEN_TRANSLATOR_NO_WARMUP") == "1" or os.environ.get(
             "SCREEN_TRANSLATOR_SELFTEST"
         ) == "1":
+            return
+        # The optional Paddle worker is a separate process. Starting it from an
+        # untracked daemon thread could leave that process behind during a quick
+        # app shutdown; its first real OCR request performs the warmup instead.
+        if bool(getattr(self.ocr_engine, "uses_external_component", False)):
             return
 
         def job() -> None:
@@ -851,6 +922,7 @@ class Application(QObject):
         dialog.finished.connect(
             lambda result, page=dialog: self._close_settings_page(page, result)
         )
+        dialog.install_update_requested.connect(self.install_update)
         self.window.show_settings_page(dialog)
 
     def _begin_settings_exit(self, page: SettingsDialog, result: int) -> None:
@@ -892,9 +964,7 @@ class Application(QObject):
                 self.config.get("translation.cache_ttl_days", 30),
                 self.config.get("translation.cache_max_entries", 2000),
             )
-        self.ocr_engine = create_ocr_engine(
-            self.config.get("ocr.engine", "paddle"), self.config.section("ocr"), self.config
-        )
+        self.ocr_engine = self._create_configured_ocr_engine()
         resolved_service = self._resolve_translator_service()
         if resolved_service != self.config.get("translation.service", "mock"):
             self.config.set("translation.service", resolved_service)
@@ -935,19 +1005,122 @@ class Application(QObject):
         if target:
             self.config.set("translation.target_language", target)
         self.config.save()
-        self.ocr_engine = create_ocr_engine(
-            self.config.get("ocr.engine", "paddle"), self.config.section("ocr"), self.config
-        )
+        self.ocr_engine = self._create_configured_ocr_engine()
         self.translator = create_translator(
             self.config.get("translation.service", "mock"),
             self.config.section("translation"),
             cache=self.cache,
             api_key_resolver=self.config.api_key,
         )
+        if self.window is not None:
+            self.window.reload_values()
         self.set_status(
-            f"已切换：OCR={self.config.get('ocr.engine')} 翻译={self.config.get('translation.service')} "
+            f"已切换：OCR={self._active_ocr_engine_name} 翻译={self.config.get('translation.service')} "
             f"目标={self.config.get('translation.target_language')}"
         )
+
+    def _create_configured_ocr_engine(self):
+        """Resolve the requested backend without making a light build unbootable."""
+        requested = str(self.config.get("ocr.engine", "windows") or "windows")
+        candidates = list(dict.fromkeys((requested, "windows", "paddle", "none")))
+        failures: list[str] = []
+        for candidate in candidates:
+            try:
+                engine = create_ocr_engine(
+                    candidate, self.config.section("ocr"), self.config
+                )
+            except (OCRUnavailableError, OSError, RuntimeError, ValueError) as exc:
+                failures.append(f"{candidate}: {exc}")
+                continue
+            self._active_ocr_engine_name = candidate
+            if candidate != requested:
+                log.warning(
+                    "OCR %s unavailable; using %s (%s)",
+                    requested,
+                    candidate,
+                    "; ".join(failures),
+                )
+                # Keep the visible selectors and the engine actually executing
+                # in agreement. This also migrates v0.1 users whose saved
+                # Paddle choice is not present in the lightweight package.
+                self.config.set("ocr.engine", candidate)
+                try:
+                    self.config.save()
+                except OSError as exc:
+                    log.warning("无法保存 OCR 回退选择：%s", exc)
+            return engine
+        raise OCRUnavailableError("没有可用的 OCR 引擎：" + "; ".join(failures))
+
+    def _check_for_updates(self) -> None:
+        if self._shutting_down or (
+            self._update_check_task is not None and self._update_check_task.isRunning()
+        ):
+            return
+        task = UpdateCheckTask(
+            __version__,
+            str(self.config.get("updates.repository", "nimbus-translate/screen-translator")),
+            include_prereleases=bool(self.config.get("updates.include_prereleases", False)),
+            parent=self.qt_app,
+        )
+        self._update_check_task = task
+        task.updateFound.connect(self._update_available)
+        task.failed.connect(lambda message: log.info("自动更新检查失败：%s", message))
+        task.finished.connect(lambda current=task: self._update_check_finished(current))
+        task.finished.connect(task.deleteLater)
+        task.start()
+
+    def _update_available(self, info) -> None:
+        message = f"发现新版本 {info.latest_version}，可在设置中下载"
+        self.set_status(message)
+        if self.tray is not None:
+            self.tray.showMessage("ScreenTranslator 更新", message)
+
+    def _update_check_finished(self, task: UpdateCheckTask) -> None:
+        if self._update_check_task is task:
+            self._update_check_task = None
+
+    def install_update(self, path: str, expected_sha256: str) -> None:
+        """Launch only a verified package produced by UpdateDownloadTask."""
+        candidate = Path(path).resolve()
+        update_root = (app_data_dir() / "updates").resolve()
+        if candidate.parent != update_root or candidate.suffix.lower() not in {".exe", ".msi"}:
+            self.show_error("更新失败", "更新包路径无效")
+            return
+        if not candidate.is_file():
+            self.show_error("更新失败", "更新包不存在")
+            return
+        if len(expected_sha256) != 64 or any(
+            char not in "0123456789abcdefABCDEF" for char in expected_sha256
+        ):
+            self.show_error("更新失败", "更新包校验信息无效")
+            return
+        try:
+            current_sha256 = sha256_file(candidate)
+        except OSError as exc:
+            self.show_error("更新失败", f"无法读取更新包：{exc}")
+            return
+        if current_sha256.casefold() != expected_sha256.casefold():
+            self.show_error("更新失败", "更新包在下载后发生变化，已拒绝执行")
+            return
+        try:
+            verify_authenticode(
+                candidate,
+                reference_path=runtime_signature_reference(),
+            )
+        except AuthenticodeVerificationError as exc:
+            self.show_error("更新失败", f"更新包数字签名验证失败：{exc}")
+            return
+        try:
+            arguments = [str(candidate)]
+            if candidate.suffix.lower() == ".exe":
+                arguments += ["/SP-", "/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]
+            else:
+                arguments = ["msiexec.exe", "/i", str(candidate), "/passive"]
+            subprocess.Popen(arguments, close_fds=True)
+        except OSError as exc:
+            self.show_error("更新失败", f"无法启动安装程序：{exc}")
+            return
+        self.shutdown()
 
     def _resolve_translator_service(self) -> str:
         """启动时若当前是 mock 且检测到已配置的真实服务 Key，自动切换。"""
@@ -1030,9 +1203,10 @@ class Application(QObject):
             history_dir.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d_%H%M%S")
             capture_path = history_dir / f"capture_{stamp}.png"
-            import cv2
+            from PIL import Image
 
-            cv2.imwrite(str(capture_path), capture.image)
+            rgb = capture.image[:, :, ::-1]
+            Image.fromarray(rgb, mode="RGB").save(capture_path, format="PNG")
             record = {"capture": capture_path.name, "regions": [r.to_dict() for r in regions]}
             (history_dir / f"regions_{stamp}.json").write_text(
                 json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"

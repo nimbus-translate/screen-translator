@@ -206,10 +206,7 @@ def _sample_background(region: np.ndarray):
     if text_count < 8 or text_count > region.size * 0.9:
         return center
 
-    import cv2
-
-    kernel = np.ones((9, 9), np.uint8)
-    dilated = cv2.dilate(text_mask.astype(np.uint8), kernel).astype(bool)
+    dilated = _binary_dilate(text_mask, radius=4)
     ring = dilated & ~text_mask
     ring_pixels = region[ring]
     if ring_pixels.size < 8:
@@ -274,6 +271,34 @@ def _otsu_threshold_np(values: np.ndarray) -> int:
     return best_threshold
 
 
+def _binary_dilate(mask: np.ndarray, radius: int) -> np.ndarray:
+    """Dilate a small boolean text mask without pulling cv2 into the core app."""
+    source = np.asarray(mask, dtype=bool)
+    if radius <= 0 or source.size == 0:
+        return source.copy()
+    height, width = source.shape
+    padded = np.pad(source, radius, mode="constant", constant_values=False)
+    result = np.zeros_like(source)
+    diameter = radius * 2 + 1
+    for offset_y in range(diameter):
+        for offset_x in range(diameter):
+            result |= padded[offset_y : offset_y + height, offset_x : offset_x + width]
+    return result
+
+
+def _resize_bgr(
+    image_bgr: np.ndarray, width: int, height: int, *, upscale: bool
+) -> np.ndarray:
+    """Resize BGR pixels with Pillow for the lightweight Windows build."""
+    from PIL import Image
+
+    rgb = np.ascontiguousarray(image_bgr[:, :, ::-1])
+    source = Image.fromarray(rgb, mode="RGB")
+    resample = Image.Resampling.BICUBIC if upscale else Image.Resampling.LANCZOS
+    resized = source.resize((max(1, int(width)), max(1, int(height))), resample=resample)
+    return np.asarray(resized, dtype=np.uint8)[:, :, ::-1].copy()
+
+
 def _fallback_colors(region: np.ndarray) -> tuple[str, str, float]:
     """退化：按整体亮度选择黑白，保证可读。"""
     gray = region.mean(axis=2) if region.ndim == 3 else region
@@ -285,14 +310,12 @@ def _fallback_colors(region: np.ndarray) -> tuple[str, str, float]:
 
 def resize_to_max(image_bgr: np.ndarray, max_side: int = 4096) -> tuple[np.ndarray, float]:
     """超长边缩放到 max_side，返回 (新图, 缩放比例)。"""
-    import cv2
-
     h, w = image_bgr.shape[:2]
     long_side = max(h, w)
     if long_side <= max_side:
         return image_bgr, 1.0
     scale = max_side / long_side
-    resized = cv2.resize(image_bgr, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+    resized = _resize_bgr(image_bgr, round(w * scale), round(h * scale), upscale=False)
     return resized, scale
 
 
@@ -309,22 +332,20 @@ def resize_for_ocr(
     “涂成一块”。先放大到长边 min_side 再识别，行数可翻 3~4 倍；坐标随后
     按 scale 还原到原图坐标。
     """
-    import cv2
-
     h, w = image_bgr.shape[:2]
     long_side = max(h, w)
     if long_side <= min_side:
         scale = min(min_side / long_side, max_upscale)
         if scale <= 1.0:
             return image_bgr, 1.0
-        resized = cv2.resize(
-            image_bgr, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_CUBIC
+        resized = _resize_bgr(
+            image_bgr, round(w * scale), round(h * scale), upscale=True
         )
         return resized, scale
     if long_side > max_side:
         scale = max_side / long_side
-        resized = cv2.resize(
-            image_bgr, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA
+        resized = _resize_bgr(
+            image_bgr, round(w * scale), round(h * scale), upscale=False
         )
         return resized, scale
     return image_bgr, 1.0

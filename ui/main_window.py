@@ -512,7 +512,7 @@ class MainWindow(QWidget):
         self._block_signals = True
         self.combo_source.setCurrentIndex(self._index_of(self.combo_source, self.controller.config.get("translation.source_language", "auto")))
         self.combo_target.setCurrentIndex(self._index_of(self.combo_target, self.controller.config.get("translation.target_language", "zh")))
-        self.combo_ocr.setCurrentIndex(self._index_of(self.combo_ocr, self.controller.config.get("ocr.engine", "paddle")))
+        self.combo_ocr.setCurrentIndex(self._index_of(self.combo_ocr, self.controller.config.get("ocr.engine", "windows")))
         self.combo_service.setCurrentIndex(self._index_of(self.combo_service, self.controller.config.get("translation.service", "mymemory")))
         self.check_keep_original.setChecked(bool(self.controller.config.get("translation.keep_original", False)))
         self._block_signals = False

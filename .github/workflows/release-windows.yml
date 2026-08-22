@@ -1,0 +1,204 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows-lite:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          $version = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $env:RELEASE_VERSION_INPUT
+          } else {
+            if (-not $env:GITHUB_REF_NAME.StartsWith("v")) { throw "Release tag must start with v." }
+            $env:GITHUB_REF_NAME.Substring(1)
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw "Invalid release version: $version" }
+          $isPrerelease = $version.Contains("-")
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $existingTag = git ls-remote --tags origin "refs/tags/v$version"
+            if ($LASTEXITCODE -ne 0) { throw "Unable to check whether v$version already exists." }
+            if ($existingTag) { throw "Release tag v$version already exists; refusing to overwrite it." }
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "make_latest=$(((-not $isPrerelease)).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "RELEASE_DIR=$env:RUNNER_TEMP\screen-translator-release" >> $env:GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-core.txt
+
+      - name: Install lightweight build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-core.txt pytest "pyinstaller<7"
+          choco install innosetup --no-progress --yes
+
+      - name: Test lightweight source tree
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests -q
+
+      - name: Static-parse release scripts
+        shell: pwsh
+        run: |
+          $paths = @(
+            "scripts/build_lite.ps1",
+            "scripts/sign_release.ps1",
+            "scripts/sign_component_manifest.ps1",
+            "scripts/write_component_catalog.ps1",
+            "scripts/build_paddle_component.ps1",
+            "scripts/verify_paddle_component.ps1"
+          )
+          foreach ($path in $paths) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw "$path parse failed: $($errors | Out-String)" }
+          }
+
+      - name: Build unsigned lightweight executable
+        shell: pwsh
+        run: .\scripts\build_lite.ps1 -Version "${{ steps.version.outputs.value }}" -SkipInstaller
+
+      - name: Verify frozen lightweight executable
+        shell: pwsh
+        run: |
+          $verifyRoot = "$env:RUNNER_TEMP\screen-translator-lite-verification"
+          New-Item -ItemType Directory -Force -Path $verifyRoot | Out-Null
+          $env:SCREEN_TRANSLATOR_CONFIG = Join-Path $verifyRoot "config.json"
+          $env:SCREEN_TRANSLATOR_NO_WARMUP = "1"
+          $env:SCREEN_TRANSLATOR_SMOKE = "1"
+          $smoke = Start-Process -FilePath .\dist\ScreenTranslator-Lite.exe -PassThru -Wait -WindowStyle Hidden
+          if ($smoke.ExitCode -ne 0) { throw "Frozen GUI smoke test failed ($($smoke.ExitCode))." }
+          Remove-Item Env:SCREEN_TRANSLATOR_SMOKE
+          $env:SCREEN_TRANSLATOR_SELFTEST = "1"
+          $selftest = Start-Process -FilePath .\dist\ScreenTranslator-Lite.exe -PassThru -Wait -WindowStyle Hidden
+          if ($selftest.ExitCode -ne 0) { throw "Frozen OCR self-test failed ($($selftest.ExitCode))." }
+          $logPath = Join-Path $verifyRoot "logs\app.log"
+          if (-not (Test-Path -LiteralPath $logPath) -or (Get-Content -Raw -LiteralPath $logPath) -notmatch "SELFTEST OK") {
+            throw "Frozen OCR self-test did not emit SELFTEST OK."
+          }
+
+      - name: Sign lightweight executable
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: .\scripts\sign_release.ps1 -Path .\dist\ScreenTranslator-Lite.exe
+
+      - name: Build signed lightweight installer and uninstaller
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: .\scripts\build_lite.ps1 -Version "${{ steps.version.outputs.value }}" -OutputDirectory "$env:RELEASE_DIR" -SkipAppBuild -SignWithReleaseCertificate
+
+      - name: Install optional PaddleOCR component dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements-paddle.txt
+
+      - name: Download and validate component models
+        shell: pwsh
+        run: |
+          $modelDir = "$env:RUNNER_TEMP\paddle-models"
+          New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+          $env:PADDLE_PDX_CACHE_HOME = $modelDir
+          python -c "import numpy as np; from paddleocr import PaddleOCR; ocr=PaddleOCR(use_doc_orientation_classify=False,use_doc_unwarping=False,use_textline_orientation=True,text_detection_model_name='PP-OCRv5_mobile_det',text_recognition_model_name='PP-OCRv5_mobile_rec',lang='ch'); list(ocr.predict(np.zeros((64,64,3),dtype=np.uint8)))"
+          "PADDLE_COMPONENT_MODEL_DIR=$modelDir" >> $env:GITHUB_ENV
+
+      - name: Build optional PaddleOCR component
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm --clean paddle_component.spec
+
+      - name: Sign optional PaddleOCR component
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: .\scripts\sign_release.ps1 -Path .\dist\PaddleOCRComponent\PaddleOCRComponent.exe
+
+      - name: Stabilize optional component model cache
+        shell: pwsh
+        run: .\dist\PaddleOCRComponent\PaddleOCRComponent.exe --warmup
+
+      - name: Generate optional component file catalog
+        shell: pwsh
+        run: .\scripts\write_component_catalog.ps1 -ComponentDirectory .\dist\PaddleOCRComponent
+
+      - name: Sign optional component file catalog
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: .\scripts\sign_component_manifest.ps1 -Path .\dist\PaddleOCRComponent\component-files.json -OutputPath .\dist\PaddleOCRComponent\component-files.p7s
+
+      - name: Warm up cataloged PaddleOCR component
+        shell: pwsh
+        run: .\dist\PaddleOCRComponent\PaddleOCRComponent.exe --warmup
+
+      - name: Verify component stayed immutable after warmup
+        shell: pwsh
+        run: .\scripts\write_component_catalog.ps1 -ComponentDirectory .\dist\PaddleOCRComponent -VerifyExisting
+
+      - name: Archive optional PaddleOCR component
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          $assetUrl = "https://github.com/${{ github.repository }}/releases/download/v$version/PaddleOCRComponent-$version-windows.zip"
+          .\scripts\build_paddle_component.ps1 -Version $version -AssetUrl $assetUrl -OutputDirectory "$env:RELEASE_DIR" -ModelDirectory "$env:PADDLE_COMPONENT_MODEL_DIR" -SkipBuild
+
+      - name: Sign optional component manifest
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: .\scripts\sign_component_manifest.ps1 -Path "$env:RELEASE_DIR\paddle-component-manifest.json" -OutputPath "$env:RELEASE_DIR\paddle-component-manifest.p7s"
+
+      - name: Verify published component payload
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          .\scripts\verify_paddle_component.ps1 -ArchivePath "$env:RELEASE_DIR\PaddleOCRComponent-$version-windows.zip" -ManifestPath "$env:RELEASE_DIR\paddle-component-manifest.json" -ManifestSignaturePath "$env:RELEASE_DIR\paddle-component-manifest.p7s"
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          make_latest: ${{ steps.version.outputs.make_latest }}
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.RELEASE_DIR }}\ScreenTranslator-Lite-${{ steps.version.outputs.value }}-Setup.exe
+            ${{ env.RELEASE_DIR }}\ScreenTranslator-Lite-${{ steps.version.outputs.value }}-Setup.exe.sha256
+            ${{ env.RELEASE_DIR }}\PaddleOCRComponent-${{ steps.version.outputs.value }}-windows.zip
+            ${{ env.RELEASE_DIR }}\paddle-component-manifest.json
+            ${{ env.RELEASE_DIR }}\paddle-component-manifest.p7s

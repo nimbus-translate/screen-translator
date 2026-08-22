@@ -40,12 +40,12 @@ class GoogleTranslator(Translator):
                 timeout=float(self.config.get("timeout_seconds", 30)),
             )
         except requests.RequestException as exc:
-            raise TranslationError(f"Google 翻译请求失败：{exc}") from exc
+            raise TranslationError("Google 翻译请求失败（网络连接异常）") from exc
         response.encoding = "utf-8"
         if response.status_code == 403:
             raise TranslationError("Google API Key 无效或未启用 Translation API（403）")
         if response.status_code != 200:
-            raise TranslationError(f"Google 返回错误 {response.status_code}：{response.text[:200]}")
+            raise TranslationError(f"Google 返回错误 {response.status_code}")
         try:
             items = response.json()["data"]["translations"]
             return [html.unescape(item["translatedText"]) for item in items]

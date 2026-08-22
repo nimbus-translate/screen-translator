@@ -38,14 +38,14 @@ class DeepLTranslator(Translator):
                 timeout=float(self.config.get("timeout_seconds", 30)),
             )
         except requests.RequestException as exc:
-            raise TranslationError(f"DeepL 请求失败：{exc}") from exc
+            raise TranslationError("DeepL 请求失败（网络连接异常）") from exc
         response.encoding = "utf-8"
         if response.status_code == 403:
             raise TranslationError("DeepL API Key 无效")
         if response.status_code == 456:
             raise TranslationError("DeepL 翻译额度不足（456）")
         if response.status_code != 200:
-            raise TranslationError(f"DeepL 返回错误 {response.status_code}：{response.text[:200]}")
+            raise TranslationError(f"DeepL 返回错误 {response.status_code}")
         try:
             translations = response.json()["translations"]
             return [item["text"] for item in translations]

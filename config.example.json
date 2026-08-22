@@ -5,6 +5,11 @@
     "save_history": false,
     "history_dir": ""
   },
+  "updates": {
+    "auto_check": true,
+    "include_prereleases": false,
+    "repository": "nimbus-translate/screen-translator"
+  },
   "appearance": {
     "schema_version": 1,
     "palette": "warm_paper",
@@ -18,8 +23,8 @@
     "select_mask_opacity": 84
   },
   "ocr": {
-    "engine": "paddle",
-    "lang": "ch",
+    "engine": "windows",
+    "lang": "auto",
     "min_confidence": 0.6,
     "merge_y_tolerance_ratio": 0.3,
     "merge_x_gap_ratio": 0.8,
@@ -27,7 +32,8 @@
       "use_gpu": false,
       "text_detection_model_name": "PP-OCRv5_mobile_det",
       "text_recognition_model_name": "PP-OCRv5_mobile_rec",
-      "use_textline_orientation": false
+      "use_textline_orientation": false,
+      "component_manifest_url": "https://github.com/nimbus-translate/screen-translator/releases/latest/download/paddle-component-manifest.json"
     }
   },
   "translation": {

@@ -96,15 +96,29 @@ class Translator(ABC):
                 return self._translate_batch(texts, source_language, target_language)
             except TranslationError as exc:
                 last_error = exc
-                log.warning("批量翻译第 %d 次失败：%s", attempt + 1, exc)
+                # Translation errors may wrap HTTP requests whose string form contains
+                # the captured OCR text (for example Google's ``q`` parameter).  Logs
+                # are included in diagnostic exports, so record structure only.
+                log.warning(
+                    "批量翻译第 %d 次失败（类型=%s，限流=%s）",
+                    attempt + 1,
+                    type(exc).__name__,
+                    bool(getattr(exc, "rate_limited", False)),
+                )
                 # 限流：重试只会继续触发 429，立即进入降级分支
                 if getattr(exc, "rate_limited", False):
                     break
                 if attempt < max_retries:
                     time.sleep(delay * (2**attempt))
             except Exception as exc:  # 网络等未包装异常
-                last_error = TranslationError(str(exc))
-                log.warning("批量翻译第 %d 次异常：%s", attempt + 1, exc)
+                # Never promote an arbitrary exception string to a user-visible
+                # TranslationError: requests exceptions can contain the full URL.
+                last_error = TranslationError("翻译服务发生未预期错误")
+                log.warning(
+                    "批量翻译第 %d 次异常（类型=%s）",
+                    attempt + 1,
+                    type(exc).__name__,
+                )
                 if attempt < max_retries:
                     time.sleep(delay * (2**attempt))
 
@@ -131,12 +145,15 @@ class Translator(ABC):
                     out.append(self._translate_batch([text], source_language, target_language)[0])
                     ok = True
                     break
-                except Exception as exc:
-                    last_error = last_error or TranslationError(str(exc))
+                except Exception:
+                    if last_error is None:
+                        last_error = TranslationError("翻译服务发生未预期错误")
             if not ok:
                 self.last_failed_count += 1
                 out.append(text)
-                log.warning("单条翻译失败，保留原文：%r", text[:40])
+                # Never place captured screen text in logs: diagnostic bundles
+                # intentionally include logs and must not become translation history.
+                log.warning("单条翻译失败，已保留原文（长度=%d）", len(text))
 
         if self.last_failed_count == len(texts):
             raise TranslationError(str(last_error or "翻译失败"))

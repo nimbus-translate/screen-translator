@@ -89,7 +89,7 @@ class MyMemoryTranslator(Translator):
                 timeout=float(self.config.get("timeout_seconds", 30)),
             )
         except requests.RequestException as exc:
-            raise TranslationError(f"MyMemory 请求失败：{exc}") from exc
+            raise TranslationError("MyMemory 请求失败（网络连接异常）") from exc
         response.encoding = "utf-8"
         if response.status_code == 429:
             self._on_rate_limited()
@@ -98,8 +98,9 @@ class MyMemoryTranslator(Translator):
             raise TranslationError(f"MyMemory 返回错误 {response.status_code}")
         try:
             data = response.json()
-            if int(data.get("responseStatus", 0)) != 200:
-                raise TranslationError(f"MyMemory 返回错误：{data.get('responseDetails') or data.get('responseStatus')}")
+            response_status = int(data.get("responseStatus", 0))
+            if response_status != 200:
+                raise TranslationError(f"MyMemory 返回错误 {response_status}")
             translated = data["responseData"]["translatedText"]
         except (KeyError, ValueError) as exc:
             raise TranslationError("MyMemory 响应格式异常") from exc

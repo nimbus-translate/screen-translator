@@ -96,7 +96,7 @@ class GoogleFreeTranslator(Translator):
             except requests.RequestException as exc:
                 if attempt == 0:
                     continue
-                raise TranslationError(f"Google 免费翻译请求失败：{exc}") from exc
+                raise TranslationError("Google 免费翻译请求失败（网络连接异常）") from exc
             if response.status_code == 429:
                 raise TranslationError("Google 免费翻译请求过于频繁（429），已保留原文", rate_limited=True)
             if response.status_code >= 500 and attempt == 0:

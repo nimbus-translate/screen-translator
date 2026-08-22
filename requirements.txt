@@ -1,28 +1,4 @@
-# 屏幕截图翻译覆盖工具 - Python 3.11+
-
-# 桌面 UI
-PySide6>=6.6
-
-# 屏幕截图
-mss>=9.0
-
-# 图像处理
-Pillow>=10.0
-opencv-contrib-python>=4.8
-numpy>=1.26
-
-# OCR（PaddleOCR 3.x + PaddlePaddle）
-# 注意：paddlepaddle 3.3.x 在 Windows CPU 上存在 oneDNN 推理 bug（ConvertPirAttribute2RuntimeAttribute），
-# 目前锁定 3.2.x 可稳定运行。
-paddleocr>=3.0
-paddlepaddle>=3.2.2,<3.3.0
-
-# 全局快捷键
-pynput>=1.7
-
-# 在线翻译（OpenAI / DeepL / Google）
-requests>=2.31
-
-# 测试与打包
-pytest>=8.0
-pyinstaller>=6.0
+# Backward-compatible full development environment.
+# End users receive requirements-core in the lightweight build; PaddleOCR is
+# delivered as an optional component instead of bloating the first download.
+-r requirements-dev.txt

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPropertyAnimation, QRect, QTimer, Qt, Signal
@@ -24,17 +25,22 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QScrollArea,
+    QProgressBar,
     QFrame,
     QStackedWidget,
     QVBoxLayout,
     QCheckBox,
+    QApplication,
     QWidget,
 )
 
 from app.config import DEFAULTS, AppConfig
 from app.hotkeys import HotkeyError, normalize_hotkey
-from app.logger import get_logger
+from app.logger import app_data_dir, get_logger
+from app.version import __version__
+from services.diagnostics import DiagnosticsExportError, export_diagnostics
 from services.ocr.base import list_ocr_engines
+from services.ocr.paddle_ocr import PaddleOCREngine, component_manager
 from services.translation.base import list_translators
 from services.translation.factory import service_display_name
 from ui.appearance import (
@@ -46,7 +52,9 @@ from ui.appearance import (
     current_tokens,
 )
 from ui.motion import BASE, SLOW, ENTER_EASING, EXIT_EASING, MOVE_EASING, motion_duration
+from ui.ocr_component_tasks import PaddleComponentInstallTask
 from ui.personalization import AppearancePreview, PersonalizationChoiceRow
+from ui.update_tasks import UpdateCheckTask, UpdateDownloadTask
 from utils.language_utils import LANGUAGES
 
 log = get_logger("settings")
@@ -88,6 +96,7 @@ class SettingsDialog(QWidget):
     accepted = Signal()
     exit_requested = Signal(int)
     finished = Signal(int)
+    install_update_requested = Signal(str, str)
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self.config = config
@@ -108,6 +117,11 @@ class SettingsDialog(QWidget):
         self._pending_exit_result = -1
         self._close_intent = -1
         self._lifecycle_progress = 0.0
+        self._update_info = None
+        self._downloaded_update: tuple[str, str] | None = None
+        self._update_check_task: UpdateCheckTask | None = None
+        self._update_download_task: UpdateDownloadTask | None = None
+        self._paddle_component_task: PaddleComponentInstallTask | None = None
         self._build_ui()
         self._load()
         self.refresh_appearance()
@@ -178,6 +192,7 @@ class SettingsDialog(QWidget):
         self._settings_glyph.set_lifecycle_progress(self._lifecycle_progress)
 
     def _request_exit(self, result: int) -> None:
+        self.cancel_background_tasks()
         self._settle_page_transition_for_exit()
         self._exit_pending = True
         self._pending_exit_result = int(result)
@@ -520,8 +535,189 @@ class SettingsDialog(QWidget):
         history_form.addRow(self.chk_history)
         history_form.addRow("历史目录", row)
         layout.addWidget(self._card("本地记录", "历史记录只保存在你选择的本机目录。", history_form))
+
+        self.chk_auto_updates = QCheckBox("自动检查新版本")
+        self.update_status = QLabel(f"当前版本 {__version__}")
+        self.update_status.setWordWrap(True)
+        self.btn_check_update = QPushButton("检查更新")
+        self.btn_check_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_progress = QProgressBar()
+        self.update_progress.setTextVisible(False)
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.hide()
+        self.btn_check_update.clicked.connect(self._on_update_action)
+        update_actions = QHBoxLayout()
+        update_actions.setContentsMargins(0, 0, 0, 0)
+        update_actions.addWidget(self.update_status, 1)
+        update_actions.addWidget(self.btn_check_update)
+        update_body = QVBoxLayout()
+        update_body.setContentsMargins(0, 0, 0, 0)
+        update_body.setSpacing(10)
+        update_body.addWidget(self.chk_auto_updates)
+        update_body.addLayout(update_actions)
+        update_body.addWidget(self.update_progress)
+        layout.addWidget(
+            self._card(
+                "软件更新",
+                "从 GitHub Releases 获取轻量安装包，下载后必须通过 SHA-256 校验。",
+                update_body,
+            )
+        )
+
+        self.btn_export_diagnostics = QPushButton("导出诊断日志")
+        self.btn_export_diagnostics.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_export_diagnostics.clicked.connect(self._export_diagnostics)
+        diagnostics_body = QHBoxLayout()
+        diagnostics_body.setContentsMargins(0, 0, 0, 0)
+        diagnostics_body.addWidget(QLabel("仅包含脱敏配置、运行环境和最近日志。"), 1)
+        diagnostics_body.addWidget(self.btn_export_diagnostics)
+        layout.addWidget(
+            self._card(
+                "诊断与支持",
+                "不会打包截图、翻译历史、模型文件或 API Key。",
+                diagnostics_body,
+            )
+        )
         layout.addStretch(1)
         return tab
+
+    def _export_diagnostics(self) -> None:
+        suggested = app_data_dir() / f"ScreenTranslator-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        target, _ = QFileDialog.getSaveFileName(
+            self, "导出诊断日志", str(suggested), "ZIP 压缩包 (*.zip)"
+        )
+        if not target:
+            return
+        try:
+            exported = export_diagnostics(target, self.config, app_version=__version__)
+        except DiagnosticsExportError as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+            return
+        QMessageBox.information(self, "导出完成", f"诊断日志已保存到：\n{exported}")
+
+    def _on_update_action(self) -> None:
+        if self._downloaded_update is not None:
+            self._confirm_update_install()
+        elif self._update_info is None:
+            self._check_for_updates()
+        else:
+            self._download_update()
+
+    def _check_for_updates(self) -> None:
+        if self._update_check_task is not None and self._update_check_task.isRunning():
+            return
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("检查中…")
+        self.update_status.setText("正在连接 GitHub Releases…")
+        task = UpdateCheckTask(
+            __version__,
+            str(self.config.get("updates.repository", "nimbus-translate/screen-translator")),
+            include_prereleases=bool(self.config.get("updates.include_prereleases", False)),
+            parent=QApplication.instance(),
+        )
+        self._update_check_task = task
+        task.updateFound.connect(self._update_found)
+        task.upToDate.connect(self._update_current)
+        task.failed.connect(self._update_failed)
+        task.finished.connect(lambda current=task: self._update_task_finished("check", current))
+        task.finished.connect(task.deleteLater)
+        task.start()
+
+    def _update_found(self, info) -> None:
+        self._update_info = info
+        self._downloaded_update = None
+        self.update_status.setText(f"发现新版本 {info.latest_version} · {info.release_name}")
+        self.btn_check_update.setText("下载更新")
+        self.btn_check_update.setEnabled(True)
+
+    def _update_current(self) -> None:
+        self._update_info = None
+        self.update_status.setText(f"当前已是最新版本 {__version__}")
+        self.btn_check_update.setText("重新检查")
+        self.btn_check_update.setEnabled(True)
+
+    def _update_failed(self, message: str, operation: str = "检查") -> None:
+        self.update_progress.hide()
+        self.update_status.setText(f"{operation}失败：{message}")
+        self.btn_check_update.setText("重试")
+        self.btn_check_update.setEnabled(True)
+
+    def _download_update(self) -> None:
+        info = self._update_info
+        if info is None or (
+            self._update_download_task is not None and self._update_download_task.isRunning()
+        ):
+            return
+        destination = app_data_dir() / "updates" / info.asset.name
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("下载中…")
+        self.update_progress.setValue(0)
+        self.update_progress.show()
+        task = UpdateDownloadTask(
+            info,
+            destination,
+            str(self.config.get("updates.repository", "nimbus-translate/screen-translator")),
+            parent=QApplication.instance(),
+        )
+        self._update_download_task = task
+        task.progress.connect(self._update_download_progress)
+        task.completed.connect(self._update_downloaded)
+        task.failed.connect(self._update_download_failed)
+        task.finished.connect(lambda current=task: self._update_task_finished("download", current))
+        task.finished.connect(task.deleteLater)
+        task.start()
+
+    def _update_download_progress(self, completed: int, total: int) -> None:
+        if total > 0:
+            percent = max(0, min(100, round(completed * 100 / total)))
+            self.update_progress.setRange(0, 100)
+            self.update_progress.setValue(percent)
+            self.update_status.setText(f"正在下载并校验… {percent}%")
+        else:
+            self.update_progress.setRange(0, 0)
+
+    def _update_download_failed(self, message: str) -> None:
+        self._update_failed(message, "下载")
+
+    def _update_downloaded(self, path: str, sha256: str) -> None:
+        self._downloaded_update = (path, sha256)
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(100)
+        self.update_status.setText("更新包已下载并通过 SHA-256 校验")
+        self.btn_check_update.setText("安装已下载更新")
+        self.btn_check_update.setEnabled(True)
+        self._confirm_update_install()
+
+    def _confirm_update_install(self) -> None:
+        downloaded = self._downloaded_update
+        if downloaded is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "安装更新",
+            "更新包已通过 SHA-256 校验。确认后还会验证发布者数字签名；"
+            "签名有效才会退出 ScreenTranslator 并启动安装程序。",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.btn_check_update.setEnabled(False)
+            self.install_update_requested.emit(*downloaded)
+
+    def cancel_background_tasks(self) -> None:
+        """Request cancellation without destroying a still-running QThread."""
+        for task in (
+            self._update_check_task,
+            self._update_download_task,
+            self._paddle_component_task,
+        ):
+            if task is not None and task.isRunning():
+                task.cancel()
+
+    def _update_task_finished(self, kind: str, task) -> None:
+        if kind == "check" and self._update_check_task is task:
+            self._update_check_task = None
+        elif kind == "download" and self._update_download_task is task:
+            self._update_download_task = None
 
     def _build_personalization_tab(self) -> QWidget:
         tab, layout = self._new_page()
@@ -633,7 +829,7 @@ class SettingsDialog(QWidget):
         for engine in list_ocr_engines():
             self.combo_engine.addItem(engine, engine)
         self.combo_lang = QComboBox()
-        for code, name in LANGUAGES[1:]:
+        for code, name in LANGUAGES:
             self.combo_lang.addItem(name, code)
         self.spin_confidence = QDoubleSpinBox()
         self.spin_confidence.setRange(0.0, 1.0)
@@ -654,6 +850,33 @@ class SettingsDialog(QWidget):
         engine_form.addRow(self.chk_orientation)
         layout.addWidget(self._card("识别引擎", "选择文字识别方式与运行能力。", engine_form))
 
+        self.paddle_component_status = QLabel()
+        self.paddle_component_status.setWordWrap(True)
+        self.paddle_component_progress = QProgressBar()
+        self.paddle_component_progress.setTextVisible(False)
+        self.paddle_component_progress.setRange(0, 100)
+        self.paddle_component_progress.hide()
+        self.btn_install_paddle = QPushButton("下载 PaddleOCR 组件")
+        self.btn_install_paddle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_install_paddle.clicked.connect(self._install_paddle_component)
+        component_actions = QHBoxLayout()
+        component_actions.setContentsMargins(0, 0, 0, 0)
+        component_actions.addWidget(self.paddle_component_status, 1)
+        component_actions.addWidget(self.btn_install_paddle)
+        component_body = QVBoxLayout()
+        component_body.setContentsMargins(0, 0, 0, 0)
+        component_body.setSpacing(10)
+        component_body.addLayout(component_actions)
+        component_body.addWidget(self.paddle_component_progress)
+        layout.addWidget(
+            self._card(
+                "可选高精度组件",
+                "轻量版默认使用 Windows OCR；需要更高识别率时再下载 PaddleOCR 与模型。",
+                component_body,
+            )
+        )
+        self._refresh_paddle_component_status()
+
         merge_form = self._new_form()
         merge_form.addRow("最低置信度", self.spin_confidence)
         merge_form.addRow("行合并容差", self.spin_y_tol)
@@ -661,6 +884,74 @@ class SettingsDialog(QWidget):
         layout.addWidget(self._card("文本组合", "控制零散文字块如何合并成自然语句。", merge_form))
         layout.addStretch(1)
         return tab
+
+    def _refresh_paddle_component_status(self) -> None:
+        if PaddleOCREngine.local_available():
+            self.paddle_component_status.setText("当前完整版已内置 PaddleOCR")
+            self.btn_install_paddle.setEnabled(False)
+            self.btn_install_paddle.setText("已内置")
+            return
+        manager = component_manager(self.config)
+        if manager.is_installed():
+            installed = manager.installed_manifest()
+            version = installed.version if installed is not None else ""
+            self.paddle_component_status.setText(f"PaddleOCR 组件 {version} 已安装")
+            self.btn_install_paddle.setEnabled(True)
+            self.btn_install_paddle.setText("检查组件更新")
+        else:
+            self.paddle_component_status.setText("未安装，不影响 Windows OCR 使用")
+            self.btn_install_paddle.setEnabled(True)
+            self.btn_install_paddle.setText("下载 PaddleOCR 组件")
+
+    def _install_paddle_component(self) -> None:
+        if self._paddle_component_task is not None and self._paddle_component_task.isRunning():
+            return
+        self.btn_install_paddle.setEnabled(False)
+        self.btn_install_paddle.setText("检查并下载…")
+        self.paddle_component_progress.setRange(0, 100)
+        self.paddle_component_progress.setValue(0)
+        self.paddle_component_progress.show()
+        task = PaddleComponentInstallTask(
+            component_manager(self.config), parent=QApplication.instance()
+        )
+        self._paddle_component_task = task
+        task.progress.connect(self._paddle_component_download_progress)
+        task.completed.connect(self._paddle_component_installed)
+        task.failed.connect(self._paddle_component_failed)
+        task.finished.connect(
+            lambda current=task: self._paddle_component_task_finished(current)
+        )
+        task.finished.connect(task.deleteLater)
+        task.start()
+
+    def _paddle_component_download_progress(self, completed: int, total: int) -> None:
+        if total > 0:
+            percent = max(0, min(100, round(completed * 100 / total)))
+            self.paddle_component_progress.setRange(0, 100)
+            self.paddle_component_progress.setValue(percent)
+            self.paddle_component_status.setText(f"正在下载 PaddleOCR 与模型… {percent}%")
+        else:
+            self.paddle_component_progress.setRange(0, 0)
+            self.paddle_component_status.setText("正在下载 PaddleOCR 与模型…")
+
+    def _paddle_component_installed(self, _entrypoint: str) -> None:
+        self.paddle_component_progress.setRange(0, 100)
+        self.paddle_component_progress.setValue(100)
+        self._set_combo(self.combo_engine, "paddle")
+        self._refresh_paddle_component_status()
+        self.paddle_component_status.setText(
+            "PaddleOCR 与模型已是最新版，保存设置后启用"
+        )
+
+    def _paddle_component_failed(self, message: str) -> None:
+        self.paddle_component_progress.hide()
+        self.paddle_component_status.setText(f"组件安装失败：{message}")
+        self.btn_install_paddle.setEnabled(True)
+        self.btn_install_paddle.setText("重试下载")
+
+    def _paddle_component_task_finished(self, task) -> None:
+        if self._paddle_component_task is task:
+            self._paddle_component_task = None
 
     def _build_translation_tab(self) -> QWidget:
         tab, layout = self._new_page()
@@ -833,6 +1124,7 @@ class SettingsDialog(QWidget):
         self.chk_tray.setChecked(bool(cfg.get("general.minimize_to_tray", True)))
         self.chk_history.setChecked(bool(cfg.get("general.save_history", False)))
         self.history_dir.setText(str(cfg.get("general.history_dir", "")))
+        self.chk_auto_updates.setChecked(bool(cfg.get("updates.auto_check", True)))
 
         appearance = copy.deepcopy(DEFAULTS["appearance"])
         appearance.update(cfg.section("appearance"))
@@ -851,8 +1143,8 @@ class SettingsDialog(QWidget):
         self._loaded_appearance = self._personalization_state()
         self._refresh_personalization_preview(animate=False)
 
-        self._set_combo(self.combo_engine, cfg.get("ocr.engine", "paddle"))
-        self._set_combo(self.combo_lang, cfg.get("ocr.lang", "ch"))
+        self._set_combo(self.combo_engine, cfg.get("ocr.engine", "windows"))
+        self._set_combo(self.combo_lang, cfg.get("ocr.lang", "auto"))
         self.spin_confidence.setValue(float(cfg.get("ocr.min_confidence", 0.6)))
         self.spin_y_tol.setValue(float(cfg.get("ocr.merge_y_tolerance_ratio", 0.5)))
         self.spin_x_gap.setValue(float(cfg.get("ocr.merge_x_gap_ratio", 0.8)))
@@ -954,13 +1246,14 @@ class SettingsDialog(QWidget):
             cfg.set("general.minimize_to_tray", self.chk_tray.isChecked())
             cfg.set("general.save_history", self.chk_history.isChecked())
             cfg.set("general.history_dir", self.history_dir.text().strip())
+            cfg.set("updates.auto_check", self.chk_auto_updates.isChecked())
 
             appearance = self._personalization_state()
             for key, value in appearance.items():
                 cfg.set(f"appearance.{key}", value)
 
-            cfg.set("ocr.engine", self.combo_engine.currentData() or "paddle")
-            cfg.set("ocr.lang", self.combo_lang.currentData() or "ch")
+            cfg.set("ocr.engine", self.combo_engine.currentData() or "windows")
+            cfg.set("ocr.lang", self.combo_lang.currentData() or "auto")
             cfg.set("ocr.min_confidence", self.spin_confidence.value())
             cfg.set("ocr.merge_y_tolerance_ratio", self.spin_y_tol.value())
             cfg.set("ocr.merge_x_gap_ratio", self.spin_x_gap.value())

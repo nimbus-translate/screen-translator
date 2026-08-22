@@ -141,6 +141,11 @@ QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus { 
 QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: #E1DFD9; }
 QSlider::sub-page:horizontal { border-radius: 2px; background: #2878E8; }
 QSlider::handle:horizontal { width: 15px; height: 15px; margin: -5px 0; border-radius: 7px; background: #2878E8; }
+QProgressBar {
+    min-height: 6px; max-height: 6px; background: #E9E6E0;
+    border: none; border-radius: 3px; color: transparent;
+}
+QProgressBar::chunk { background: #2878E8; border: none; border-radius: 3px; }
 QGroupBox { border: 1px solid #E1DFD9; border-radius: 11px; margin-top: 12px; padding: 14px 12px 10px; color: #30322F; font-weight: 600; }
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
 QDialogButtonBox QPushButton { min-width: 86px; }

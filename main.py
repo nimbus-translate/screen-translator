@@ -40,18 +40,29 @@ def main() -> int:
     from PySide6.QtWidgets import QMessageBox
 
     from app.application import Application
-    from app.logger import setup_logging
+    from app.logger import get_logger, setup_logging
+    from app.version import __version__
 
     setup_logging()
+    get_logger("main").info("ScreenTranslator %s 启动", __version__)
 
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("ScreenTranslator")
+    qt_app.setApplicationVersion(__version__)
     qt_app.setOrganizationName("ScreenTranslator")
     # 关掉主窗口后不退出（交给托盘接管）
     qt_app.setQuitOnLastWindowClosed(False)
 
     # 单实例锁：防止重复启动导致快捷键冲突 / exe 被占用
-    single_instance = QSharedMemory("ScreenTranslator_SingleInstance_v1")
+    instance_key = "ScreenTranslator_SingleInstance_v1"
+    if os.environ.get("SCREEN_TRANSLATOR_SMOKE") == "1" or os.environ.get(
+        "SCREEN_TRANSLATOR_SELFTEST"
+    ) == "1":
+        # Release verification must be able to run beside the user's installed
+        # copy. Keep the production lock unchanged and isolate only explicit
+        # smoke/self-test processes.
+        instance_key += "_ReleaseVerification"
+    single_instance = QSharedMemory(instance_key)
     if not single_instance.create(1):
         QMessageBox.information(None, "屏幕截图翻译", "程序已在运行，请从系统托盘图标操作。")
         return 0
@@ -83,6 +94,7 @@ def _run_selftest(qt_app, controller) -> None:
 
     from app.logger import get_logger
     from app.models import CaptureInfo
+    from services.translation.factory import create_translator
     from workers.translation_worker import PipelineTask
 
     log = get_logger("selftest")
@@ -100,10 +112,13 @@ def _run_selftest(qt_app, controller) -> None:
     bgr = np.array(image)[:, :, ::-1].copy()
 
     capture = CaptureInfo(image=bgr, bbox=(0, 0, 700, 220), monitor_indices=[], mode="selftest")
+    translator = create_translator(
+        "mock", controller.config.section("translation"), cache=None
+    )
     task = PipelineTask(
         capture=capture,
         ocr_engine=controller.ocr_engine,
-        translator=controller.translator,
+        translator=translator,
         config=controller.config,
     )
     loop = QEventLoop()

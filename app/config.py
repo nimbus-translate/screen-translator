@@ -18,6 +18,11 @@ DEFAULTS: dict[str, Any] = {
         "save_history": False,
         "history_dir": "",
     },
+    "updates": {
+        "auto_check": True,
+        "include_prereleases": False,
+        "repository": "nimbus-translate/screen-translator",
+    },
     "appearance": {
         "schema_version": 1,
         "palette": "warm_paper",
@@ -32,8 +37,8 @@ DEFAULTS: dict[str, Any] = {
         "select_border_color": "#2878E8",
     },
     "ocr": {
-        "engine": "paddle",
-        "lang": "ch",
+        "engine": "windows",
+        "lang": "auto",
         "min_confidence": 0.6,
         "merge_y_tolerance_ratio": 0.3,
         "merge_x_gap_ratio": 0.8,
@@ -42,6 +47,7 @@ DEFAULTS: dict[str, Any] = {
             "text_detection_model_name": "PP-OCRv5_mobile_det",
             "text_recognition_model_name": "PP-OCRv5_mobile_rec",
             "use_textline_orientation": False,
+            "component_manifest_url": "https://github.com/nimbus-translate/screen-translator/releases/latest/download/paddle-component-manifest.json",
         },
     },
     "translation": {
@@ -171,6 +177,9 @@ class AppConfig:
                 capture["select_border_color"] = "#2878E8"
                 if capture.get("select_mask_opacity") == 100:
                     capture["select_mask_opacity"] = 84
+                ocr = self.data.setdefault("ocr", {})
+                if ocr.get("lang") == "ch":
+                    ocr["lang"] = "zh"
         except (json.JSONDecodeError, OSError) as exc:
             backup = self.path.with_suffix(".json.bak")
             try:
